@@ -7,6 +7,7 @@
 *.dll
 *.so
 *.dylib
+tidb-optimizer-calibration
 
 # Test binary, built with `go test -c`
 *.test
