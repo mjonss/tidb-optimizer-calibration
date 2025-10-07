@@ -22,7 +22,7 @@ func TestMulti(t *testing.T) {
 	selectivities := []float64{0.02, 0.05, 0.075, 0.1, 0.15, 0.2}
 
 	// Run the optimizer tests
-	setupLogging("info")
+	setupLogging("debug")
 	err := RunOptimizerTests(rowCounts, selectivities, 7)
 	if err != nil {
 		t.Fatalf("RunOptimizerTests failed: %v", err)

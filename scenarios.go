@@ -187,6 +187,7 @@ func (r *ScenarioRunner) adjustSelectivities(tableName string, rowCount int, sel
 		return errors.New("Total selectivity > 100%")
 	}
 
+	batchSize := 50000
 	for i, sel := range selectivities {
 		// Calculate number of rows for this selectivity
 		rowsForThisSelectivity := rowsForSelectivities[i]
@@ -209,17 +210,32 @@ func (r *ScenarioRunner) adjustSelectivities(tableName string, rowCount int, sel
 		}
 
 		// First, set all rows to a unique value to avoid conflicts
-		_, err = r.client.ExecuteQuery(fmt.Sprintf("UPDATE %s SET b = -1 WHERE b = %d", tableName, rowsForThisSelectivity))
-		if err != nil {
-			return fmt.Errorf("failed to prepare selectivity %d: %v", int(sel), err)
+		for actualRowCount > 0 {
+			_, err = r.client.ExecuteQuery(fmt.Sprintf("UPDATE %s SET b = -1 WHERE b = %d LIMIT %d", tableName, rowsForThisSelectivity, batchSize))
+			if err != nil {
+				return fmt.Errorf("failed to prepare selectivity %d: %v", int(sel), err)
+			}
+			slog.Debug("Executing query", "query", fmt.Sprintf("SELECT COUNT(*) FROM %s where b = %d", tableName, rowsForThisSelectivity))
+			err = r.client.db.QueryRow(fmt.Sprintf("SELECT COUNT(*) FROM %s where b = %d", tableName, rowsForThisSelectivity)).Scan(&actualRowCount)
+			if err != nil {
+				return fmt.Errorf("failed to count rows: %v", err)
+			}
 		}
 
 		// Then update the required number of rows to the target value
-		_, err = r.client.ExecuteQuery(fmt.Sprintf(
-			"UPDATE %s SET b = %d %s ORDER BY RAND() LIMIT %d",
-			tableName, rowsForThisSelectivity, notIn, rowsForThisSelectivity))
-		if err != nil {
-			return fmt.Errorf("failed to set selectivity %d: %v", int(sel), err)
+		for actualRowCount < rowsForThisSelectivity {
+			limit := min(rowsForThisSelectivity, batchSize)
+			_, err = r.client.ExecuteQuery(fmt.Sprintf(
+				"UPDATE %s SET b = %d %s ORDER BY RAND() LIMIT %d",
+				tableName, rowsForThisSelectivity, notIn, limit))
+			if err != nil {
+				return fmt.Errorf("failed to set selectivity %d: %v", int(sel), err)
+			}
+			slog.Debug("Executing query", "query", fmt.Sprintf("SELECT COUNT(*) FROM %s where b = %d", tableName, rowsForThisSelectivity))
+			err = r.client.db.QueryRow(fmt.Sprintf("SELECT COUNT(*) FROM %s where b = %d", tableName, rowsForThisSelectivity)).Scan(&actualRowCount)
+			if err != nil {
+				return fmt.Errorf("failed to count rows: %v", err)
+			}
 		}
 	}
 
