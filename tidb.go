@@ -268,18 +268,9 @@ func (c *TiDBClient) executeQueryWithMetrics(testScenario TestScenario, retry bo
 		slog.Info("coprocessor cache used, updating values", "value", b, "rowCount", rowCount, "a", aVal, "b", bVal, "c", cVal)
 		// cache is used, try to update all b values and then back again, to invalidate the cache
 		var count int
-		for {
-			_, err = c.ExecuteQuery("UPDATE " + testScenario.TableName + " SET b = -313 where b = " + b + " LIMIT 50000")
-			if err != nil {
-				return nil, err
-			}
-			err = c.db.QueryRow("SELECT COUNT(*) FROM " + testScenario.TableName + " WHERE b = " + b).Scan(&count)
-			if err != nil {
-				return nil, fmt.Errorf("failed to get count: %w", err)
-			}
-			if count == 0 {
-				break
-			}
+		_, err = c.ExecuteQuery("UPDATE " + testScenario.TableName + " SET b = -313 where b = " + b + " ORDER BY rand() LIMIT 50000")
+		if err != nil {
+			return nil, err
 		}
 		for {
 			_, err = c.ExecuteQuery("UPDATE " + testScenario.TableName + " SET b = " + b + " where b = -313 LIMIT 50000")
