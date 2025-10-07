@@ -170,14 +170,7 @@ func (r *ScenarioRunner) adjustSelectivities(tableName string, rowCount int, sel
 	numberOfRowsToUpdate := 0
 	for _, sel := range selectivities {
 		// Calculate number of rows for this selectivity
-		var rowsForThisSelectivity int
-		if sel < 1.0 {
-			// Percentage-based selectivity
-			rowsForThisSelectivity = int(float64(rowCount) * sel)
-		} else {
-			// Row count-based selectivity
-			rowsForThisSelectivity = int(sel)
-		}
+		rowsForThisSelectivity := GetNumRows(rowCount, sel)
 		rowsForSelectivities = append(rowsForSelectivities, rowsForThisSelectivity)
 		numberOfRowsToUpdate += rowsForThisSelectivity
 		if len(selectivities) > 1 {
@@ -237,14 +230,14 @@ func (r *ScenarioRunner) adjustSelectivities(tableName string, rowCount int, sel
 		slog.Debug("Executing query", "query", fmt.Sprintf("SELECT COUNT(*) FROM %s WHERE b = %d", tableName, rowsForThisSelectivity))
 		err := r.client.db.QueryRow(fmt.Sprintf("SELECT COUNT(*) FROM %s WHERE b = %d", tableName, rowsForThisSelectivity)).Scan(&actualRowsWithValue)
 		if err != nil {
-			return fmt.Errorf("failed to verify selectivity %d: %v", int(sel), err)
+			return fmt.Errorf("failed to verify selectivity %f: %v", sel, err)
 		}
 
 		if actualRowsWithValue != rowsForThisSelectivity {
 			fmt.Printf("  - %d: Warning - Expected %d rows with value %d, got %d\n",
 				int(sel), rowsForThisSelectivity, rowsForThisSelectivity, actualRowsWithValue)
 		} else {
-			fmt.Printf("  - %d: ✅ %d rows set to value %d (verified)\n", int(sel), rowsForThisSelectivity, rowsForThisSelectivity)
+			fmt.Printf("  - %f: ✅ %d rows set to value %d (verified)\n", sel, rowsForThisSelectivity, rowsForThisSelectivity)
 		}
 	}
 

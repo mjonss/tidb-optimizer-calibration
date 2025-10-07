@@ -1,9 +1,5 @@
 package main
 
-import (
-	"fmt"
-)
-
 // TestRunner runs actual tests and outputs results
 type TestRunner struct {
 	client        *TiDBClient
@@ -33,8 +29,8 @@ func (tr *TestRunner) RunScenarioWithActualPlan(scenario TestScenario) (*TestExe
 
 		// Mark table as created in cache
 		tr.tableCache[scenario.TableName] = true
-	} else {
-		fmt.Printf("♻️  Reusing existing table %s\n", scenario.TableName)
+		//} else {
+		//	fmt.Printf("♻️  Reusing existing table %s\n", scenario.TableName)
 	}
 
 	// Execute query with real metrics

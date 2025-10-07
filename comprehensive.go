@@ -28,6 +28,16 @@ type TestExecutionResult struct {
 	ExplainOnly   bool          `json:"explain_only"`
 }
 
+// GetNumRows return number of matching rows from table rows vs selectivity
+func GetNumRows(rows int, sel float64) int {
+	if sel < 1.0 {
+		// Percentage-based selectivity (0.0 to 1.0)
+		return int(float64(rows) * sel)
+	}
+	// Row count-based selectivity
+	return int(sel)
+}
+
 // GetTestScenariosWithRowCountsAndSelectivities converts comprehensive tests to TestScenario format with custom row counts and selectivities
 func GetTestScenariosWithRowCountsAndSelectivities(rowCounts []int, selectivities []float64, repetitions int) []TestScenario {
 	var scenarios []TestScenario
@@ -38,14 +48,7 @@ func GetTestScenariosWithRowCountsAndSelectivities(rowCounts []int, selectivitie
 
 		for _, sel := range selectivities {
 			// Calculate the actual value to search for based on selectivity type
-			var searchValue int
-			if sel <= 1.0 {
-				// Percentage-based selectivity (0.0 to 1.0)
-				searchValue = int(float64(rowCount) * sel)
-			} else {
-				// Row count-based selectivity
-				searchValue = int(sel)
-			}
+			searchValue := GetNumRows(rowCount, sel)
 
 			// Create index lookup test (without hints)
 			id := fmt.Sprintf("index_%s_%s", tableSizeName, formatSelectivityName(rowCount, sel))
@@ -98,12 +101,7 @@ func GetTestScenariosWithRowCountsAndSelectivities(rowCounts []int, selectivitie
 // formatSelectivityName formats a selectivity value into a scenario ID format
 func formatSelectivityName(r int, v float64) string {
 	// Convert to a safe format for scenario IDs
-	if v < 1.0 {
-		return fmt.Sprintf("%d", int(v*float64(r)))
-	} else {
-		// Row count-based: use the row count directly
-		return fmt.Sprintf("%d", int(v))
-	}
+	return fmt.Sprintf("%d", GetNumRows(r, v))
 }
 
 // formatRowCountName formats a row count into a table name format

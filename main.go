@@ -323,12 +323,6 @@ func runAllTestCombinations(scenarios []TestScenario, selectivities []float64, r
 
 	// Output results in table format
 	outputResultsTable(results)
-
-	// Output compact summary table
-	outputCompactSummaryTable(results)
-
-	// Output summary statistics
-	outputSummaryStatistics(results)
 }
 
 // outputResultsTable outputs results in a formatted table
@@ -349,7 +343,7 @@ func outputResultsTable(results []*TestExecutionResult) {
 	}
 	sort.Strings(scenarioIDs)
 
-	for _, scenarioID := range scenarioIDs {
+	for i, scenarioID := range scenarioIDs {
 		group := scenarioMap[scenarioID]
 
 		// Collect distinct plan types and stats
@@ -390,239 +384,34 @@ func outputResultsTable(results []*TestExecutionResult) {
 		}
 
 		// Print header for this scenario
-		fmt.Printf("\nScenario: %s\n", scenarioID)
-		fmt.Printf("  Plan Types: %s\n", strings.Join(planTypes, ", "))
-		fmt.Printf("  ExplainOnly Plan Type: %s\n", explainOnlyPlanType)
-		fmt.Printf("  Average Time per Plan Type:\n")
-		for _, pt := range planTypes {
-			fmt.Printf("    %s: %.03f ms\n", pt, avgTimes[pt]*1000)
-		}
-		fmt.Printf("  Max Time per Plan Type:\n")
-		for _, pt := range planTypes {
-			fmt.Printf("    %s: %s\n", pt, planTypeMax[pt].String())
-		}
-	}
-	// Table header
-	fmt.Printf("%-20s %-15s %-12s %-8s %-8s %-8s %-8s %-8s\n",
-		"Scenario", "Plan Type", "Query Type", "Time(ms)", "RU", "Rows", "Cost", "Table")
-	fmt.Println(strings.Repeat("-", 100))
-
-	// Group results by table size for better organization
-	// Extract unique table sizes from results
-	tableSizeMap := make(map[string]bool)
-	for _, result := range results {
-		// Extract table size from scenario ID (e.g., "index_100K_1/2" -> "100K")
-		parts := strings.Split(result.ScenarioID, "_")
-		if len(parts) >= 2 {
-			tableSizeMap[parts[1]] = true
-		}
-	}
-
-	// Convert map to slice and sort
-	var tableSizes []string
-	for tableSize := range tableSizeMap {
-		tableSizes = append(tableSizes, tableSize)
-	}
-
-	// Sort table sizes by their numeric value
-	sortTableSizes(tableSizes)
-
-	for _, tableSize := range tableSizes {
-		fmt.Printf("\n📋 Table Size: %s rows\n", tableSize)
-		fmt.Println(strings.Repeat("-", 100))
-
-		// Filter results for this table size
-		var tableResults []*TestExecutionResult
-		for _, result := range results {
-			if strings.Contains(result.ScenarioID, tableSize) {
-				tableResults = append(tableResults, result)
-			}
-		}
-
-		// Sort by selectivity (1/2 to 1/512)
-		selectivities := []string{"1/2", "1/4", "1/8", "1/16", "1/32", "1/64", "1/128", "1/256", "1/512"}
-
-		for _, sel := range selectivities {
-			// Find index lookup and table scan for this selectivity
-			var indexResult, tableScanResult *TestExecutionResult
-			for _, result := range tableResults {
-				if strings.Contains(result.ScenarioID, sel) {
-					if strings.Contains(result.ScenarioID, "index_") {
-						indexResult = result
-					} else if strings.Contains(result.ScenarioID, "tablescan_") {
-						tableScanResult = result
-					}
-				}
-			}
-
-			// Output index lookup result
-			if indexResult != nil {
-				queryType := "Index"
-				timeMs := float64(indexResult.ExecutionTime.Nanoseconds()) / 1000000.0
-				fmt.Printf("%-20s %-15s %-12s %-8.1f %-8d %-8s\n",
-					indexResult.ScenarioID, indexResult.PlanType, queryType,
-					timeMs, indexResult.RowsReturned,
-					tableSize)
-			}
-
-			// Output table scan result
-			if tableScanResult != nil {
-				queryType := "TableScan"
-				timeMs := float64(tableScanResult.ExecutionTime.Nanoseconds()) / 1000000.0
-				fmt.Printf("%-20s %-15s %-12s %-8.1f %-8d %-8s\n",
-					tableScanResult.ScenarioID, tableScanResult.PlanType, queryType,
-					timeMs, tableScanResult.RowsReturned,
-					tableSize)
-			}
-		}
-	}
-}
-
-// outputCompactSummaryTable outputs a compact summary table
-func outputCompactSummaryTable(results []*TestExecutionResult) {
-	fmt.Println("\n📋 Compact Summary Table")
-	fmt.Println("=======================")
-
-	// Group by table size and show average performance
-	// Extract unique table sizes from results
-	tableSizeMap := make(map[string]bool)
-	for _, result := range results {
-		// Extract table size from scenario ID (e.g., "index_100K_1/2" -> "100K")
-		parts := strings.Split(result.ScenarioID, "_")
-		if len(parts) >= 2 {
-			tableSizeMap[parts[1]] = true
-		}
-	}
-
-	// Convert map to slice and sort
-	var tableSizes []string
-	for tableSize := range tableSizeMap {
-		tableSizes = append(tableSizes, tableSize)
-	}
-
-	// Sort table sizes by their numeric value
-	sortTableSizes(tableSizes)
-
-	fmt.Printf("%-8s %-12s %-12s %-12s %-12s %-12s %-12s\n",
-		"Table", "Index Time", "Index RU", "Scan Time", "Scan RU", "Index Rows", "Scan Rows")
-	fmt.Println(strings.Repeat("-", 80))
-
-	for _, tableSize := range tableSizes {
-		// Calculate averages for this table size
-		var indexTime, scanTime time.Duration
-		var indexRU, scanRU float64
-		var indexRows, scanRows int64
-		var indexCount, scanCount int
-
-		for _, result := range results {
-			if strings.Contains(result.ScenarioID, tableSize) {
-				if result.PlanType == "index_lookup" {
-					indexTime += result.ExecutionTime
-					indexRows += result.RowsReturned
-					indexCount++
-				} else if result.PlanType == "table_scan" {
-					scanTime += result.ExecutionTime
-					scanRows += result.RowsReturned
-					scanCount++
+		if i == 0 {
+			fmt.Printf("Scenario\t")
+			//for _, pt := range planTypes {
+			//	fmt.Printf("%s\t", pt)
+			//}
+			fmt.Printf("Choosen\t")
+			for i, pt := range planTypes {
+				fmt.Printf("%s-min\t", pt)
+				fmt.Printf("%s-avg\t", pt)
+				fmt.Printf("%s-max", pt)
+				if i == len(planTypes)-1 {
+					fmt.Printf("\n")
+				} else {
+					fmt.Printf("\t")
 				}
 			}
 		}
-
-		// Calculate averages
-		var avgIndexTime, avgScanTime time.Duration
-		var avgIndexRU, avgScanRU float64
-		var avgIndexRows, avgScanRows float64
-
-		if indexCount > 0 {
-			avgIndexTime = indexTime / time.Duration(indexCount)
-			avgIndexRU = indexRU / float64(indexCount)
-			avgIndexRows = float64(indexRows) / float64(indexCount)
+		fmt.Printf("%s\t", scenarioID)
+		fmt.Printf("%s\t", explainOnlyPlanType)
+		for i, pt := range planTypes {
+			fmt.Printf("%.03f\t", float64(planTypeMin[pt].Microseconds())/1000.0)
+			fmt.Printf("%.03f\t", avgTimes[pt]*1000)
+			fmt.Printf("%.03f", float64(planTypeMax[pt].Microseconds())/1000.0)
+			if i == len(planTypes)-1 {
+				fmt.Printf("\n")
+			} else {
+				fmt.Printf("\t")
+			}
 		}
-
-		if scanCount > 0 {
-			avgScanTime = scanTime / time.Duration(scanCount)
-			avgScanRU = scanRU / float64(scanCount)
-			avgScanRows = float64(scanRows) / float64(scanCount)
-		}
-
-		// Format output
-		indexTimeMs := float64(avgIndexTime.Nanoseconds()) / 1000000.0
-		scanTimeMs := float64(avgScanTime.Nanoseconds()) / 1000000.0
-
-		fmt.Printf("%-8s %-12.1f %-12.2f %-12.1f %-12.2f %-12.0f %-12.0f\n",
-			tableSize, indexTimeMs, avgIndexRU, scanTimeMs, avgScanRU, avgIndexRows, avgScanRows)
-	}
-}
-
-// outputSummaryStatistics outputs summary statistics
-func outputSummaryStatistics(results []*TestExecutionResult) {
-	fmt.Println("\n📈 Summary Statistics")
-	fmt.Println("====================")
-
-	var totalTime time.Duration
-	var indexLookups, tableScans int
-	var totalRows int64
-	var totalCost float64
-
-	for _, result := range results {
-		totalTime += result.ExecutionTime
-		totalRows += result.RowsReturned
-
-		if result.PlanType == "index_lookup" {
-			indexLookups++
-		} else if result.PlanType == "table_scan" {
-			tableScans++
-		}
-	}
-
-	if len(results) == 0 {
-		fmt.Println("No results found")
-		return
-	}
-	avgTime := totalTime / time.Duration(len(results))
-	avgRows := float64(totalRows) / float64(len(results))
-	avgCost := totalCost / float64(len(results))
-
-	fmt.Printf("Total Tests Executed: %d\n", len(results))
-	fmt.Printf("Total Execution Time: %v\n", totalTime)
-	fmt.Printf("Average Execution Time: %v\n", avgTime)
-	fmt.Printf("Total Rows Returned: %d\n", totalRows)
-	fmt.Printf("Average Rows per Query: %.1f\n", avgRows)
-	fmt.Printf("Total Cost: %.2f\n", totalCost)
-	fmt.Printf("Average Cost: %.2f\n", avgCost)
-	fmt.Printf("Index Lookups: %d (%.1f%%)\n", indexLookups, float64(indexLookups)/float64(len(results))*100)
-	fmt.Printf("Table Scans: %d (%.1f%%)\n", tableScans, float64(tableScans)/float64(len(results))*100)
-
-	// Performance comparison
-	fmt.Println("\n⚡ Performance Analysis")
-	fmt.Println("======================")
-
-	// Calculate average performance by plan type
-	var indexTime, tableScanTime time.Duration
-	var indexRU, tableScanRU float64
-	var indexCount, tableScanCount int
-
-	for _, result := range results {
-		if result.PlanType == "index_lookup" {
-			indexTime += result.ExecutionTime
-			indexCount++
-		} else if result.PlanType == "table_scan" {
-			tableScanTime += result.ExecutionTime
-			tableScanCount++
-		}
-	}
-
-	if indexCount > 0 {
-		avgIndexTime := indexTime / time.Duration(indexCount)
-		avgIndexRU := indexRU / float64(indexCount)
-		fmt.Printf("Average Index Lookup Time: %v\n", avgIndexTime)
-		fmt.Printf("Average Index Lookup RU: %.2f\n", avgIndexRU)
-	}
-
-	if tableScanCount > 0 {
-		avgTableScanTime := tableScanTime / time.Duration(tableScanCount)
-		avgTableScanRU := tableScanRU / float64(tableScanCount)
-		fmt.Printf("Average Table Scan Time: %v\n", avgTableScanTime)
-		fmt.Printf("Average Table Scan RU: %.2f\n", avgTableScanRU)
 	}
 }

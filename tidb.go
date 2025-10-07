@@ -2,9 +2,9 @@ package main
 
 import (
 	"database/sql"
-	"encoding/json"
 	"fmt"
 	"log/slog"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -19,36 +19,17 @@ type TiDBClient struct {
 }
 
 type ExecutionPlan struct {
-	ID           string                 `json:"id"`
-	Task         string                 `json:"task"`
-	OperatorInfo string                 `json:"operator info"`
-	Count        int64                  `json:"count"`
-	EstRows      float64                `json:"estRows"`
-	EstCost      float64                `json:"estCost"`
-	ActRows      int64                  `json:"actRows"`
-	ActTime      string                 `json:"actTime"`
-	Memory       string                 `json:"memory"`
-	Disk         string                 `json:"disk"`
-	AccessObject string                 `json:"access object"`
-	Children     []*ExecutionPlan       `json:"children,omitempty"`
-	Details      map[string]interface{} `json:"details,omitempty"`
-}
-
-// ActualExecutionPlan represents the actual execution plan from TiDB (different format)
-type ActualExecutionPlan struct {
-	ID           interface{}            `json:"id"`
-	Task         string                 `json:"task"`
-	OperatorInfo string                 `json:"operator info"`
-	Count        interface{}            `json:"count"`
-	EstRows      interface{}            `json:"estRows"`
-	EstCost      interface{}            `json:"estCost"`
-	ActRows      interface{}            `json:"actRows"`
-	ActTime      string                 `json:"actTime"`
-	Memory       string                 `json:"memory"`
-	Disk         string                 `json:"disk"`
-	AccessObject string                 `json:"access object"`
-	Children     []*ActualExecutionPlan `json:"children,omitempty"`
-	Details      map[string]interface{} `json:"details,omitempty"`
+	ID            string         `json:"id"`
+	Task          string         `json:"task"`
+	Count         int64          `json:"count"`
+	EstRows       float64        `json:"estRows"`
+	ActRows       int64          `json:"actRows"`
+	AccessObject  string         `json:"access object"`
+	OperatorInfo  string         `json:"operator info"`
+	ExecutionInfo string         `json:"execution info"`
+	Memory        string         `json:"memory"`
+	Disk          string         `json:"disk"`
+	Next          *ExecutionPlan `json:"next,omitempty"`
 }
 
 // TiDBConfig holds TiDB connection configuration
@@ -105,29 +86,111 @@ func (c *TiDBClient) GetExecutionPlan(query string) (*ExecutionPlan, error) {
 		return nil, fmt.Errorf("database connection not established")
 	}
 
-	// Try TiDB JSON format first, fall back to text format
-	explainQuery := fmt.Sprintf("EXPLAIN FORMAT=\"brief\" %s", query)
-	//explainQuery := fmt.Sprintf("EXPLAIN FORMAT=\"tidb_json\" %s", query)
-	var explainBrief string
+	// Use EXPLAIN to get the tabular format execution plan
+	explainQuery := fmt.Sprintf("EXPLAIN %s", query)
 	slog.Debug("Executing query", "query", explainQuery)
-	err := c.db.QueryRow(explainQuery).Scan(&explainBrief)
+	rows, err := c.db.Query(explainQuery)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to get execution plan: %w", err)
+	}
+	defer rows.Close()
+
+	// Parse the tabular format execution plan
+	return c.parseTabularExecutionPlan(rows)
+}
+
+// EXPLAIN that return 5 columns, like normal 'EXPLAIN SELECT * FROM t'
+func getPlanFromSimpleExplain(rows *sql.Rows) (*ExecutionPlan, error) {
+	var id, task, accessObject, operatorInfo string
+	var estRows float64
+
+	if err := rows.Scan(&id, &estRows, &task, &accessObject, &operatorInfo); err != nil {
+		return nil, fmt.Errorf("failed to scan standard execution plan line: %w", err)
+	}
+	//fmt.Printf("\nExplain5 id:\n%s\n", id)
+
+	var retPlan, currPlan *ExecutionPlan
+	for {
+		plan := &ExecutionPlan{
+			ID:           id,
+			Task:         task,
+			OperatorInfo: operatorInfo,
+			EstRows:      estRows,
+			AccessObject: accessObject,
+		}
+		if retPlan == nil {
+			retPlan = plan
+			currPlan = plan
+		} else {
+			currPlan.Next = plan
+			currPlan = plan
+		}
+		if !rows.Next() {
+			break
+		}
+	}
+	return retPlan, nil
+}
+
+// EXPLAIN ANALYZE format: id, estRows, actRows, task, access object, execution info, operator info, memory, disk
+func getPlanFromExplainAnalyze(rows *sql.Rows) (*ExecutionPlan, error) {
+	var id, task, accessObject, executionInfo, operatorInfo, memory, disk string
+	var estRows, actRows float64
+
+	var retPlan, currPlan *ExecutionPlan
+	for {
+		if err := rows.Scan(&id, &estRows, &actRows, &task, &accessObject, &executionInfo, &operatorInfo, &memory, &disk); err != nil {
+			return nil, fmt.Errorf("failed to scan analyze execution plan line: %w", err)
+		}
+		//fmt.Printf("\nExplain9 id: %s\t%s\t%s\n", id, accessObject, executionInfo)
+
+		plan := &ExecutionPlan{
+			ID:            id,
+			Task:          task,
+			EstRows:       estRows,
+			ActRows:       int64(actRows),
+			OperatorInfo:  operatorInfo,
+			ExecutionInfo: executionInfo,
+			Memory:        memory,
+			Disk:          disk,
+			AccessObject:  accessObject,
+		}
+		if retPlan == nil {
+			retPlan = plan
+			currPlan = plan
+		} else {
+			currPlan.Next = plan
+			currPlan = plan
+		}
+		if !rows.Next() {
+			break
+		}
+	}
+	return retPlan, nil
+}
+
+// Standard EXPLAIN format: id, estRows, task, access object, operator info
+
+// parseTabularExecutionPlan parses a tabular format execution plan
+func (c *TiDBClient) parseTabularExecutionPlan(rows *sql.Rows) (*ExecutionPlan, error) {
+	if !rows.Next() {
+		return nil, fmt.Errorf("no execution plan found")
 	}
 
-	// Parse the TiDB JSON execution plan (returns an array)
-	var plans []ActualExecutionPlan
-	if err := json.Unmarshal([]byte(explainBrief), &plans); err != nil {
-		return nil, fmt.Errorf("failed to parse actual execution plan JSON: %w", err)
+	// Get column information to determine the format
+	columns, err := rows.Columns()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get column information: %w", err)
 	}
 
-	if len(plans) == 0 {
-		return nil, fmt.Errorf("no actual execution plan found in JSON")
+	// Handle different EXPLAIN formats based on number of columns
+	if len(columns) == 5 {
+		return getPlanFromSimpleExplain(rows)
+	} else if len(columns) == 9 {
+		return getPlanFromExplainAnalyze(rows)
+	} else {
+		return nil, fmt.Errorf("unsupported EXPLAIN format with %d columns: %v", len(columns), columns)
 	}
-
-	// Convert ActualExecutionPlan to ExecutionPlan
-	plan := c.convertActualToExecutionPlan(&plans[0])
-	return plan, nil
 }
 
 // Close closes the database connection
@@ -140,6 +203,11 @@ func (c *TiDBClient) Close() error {
 
 // ExecuteQueryWithMetrics executes a query and captures performance metrics
 func (c *TiDBClient) ExecuteQueryWithMetrics(testScenario TestScenario) (*TestExecutionResult, error) {
+	return c.executeQueryWithMetrics(testScenario, true)
+}
+
+// ExecuteQueryWithMetrics executes a query and captures performance metrics
+func (c *TiDBClient) executeQueryWithMetrics(testScenario TestScenario, retry bool) (*TestExecutionResult, error) {
 	res := &TestExecutionResult{
 		ScenarioID:  testScenario.ID,
 		Variant:     testScenario.Variant,
@@ -148,7 +216,6 @@ func (c *TiDBClient) ExecuteQueryWithMetrics(testScenario TestScenario) (*TestEx
 	}
 	query := testScenario.Query
 
-	startTime := time.Now()
 	if testScenario.ExplainOnly {
 		// Get execution plan first
 		plan, err := c.GetExecutionPlan(query)
@@ -156,10 +223,10 @@ func (c *TiDBClient) ExecuteQueryWithMetrics(testScenario TestScenario) (*TestEx
 			return nil, err
 		}
 		// Analyze the execution plan to determine plan type
-		res.PlanType = c.determinePlanType(plan)
-		res.PlanDetails = c.getPlanDetails(plan)
+		res.PlanType = determinePlanType(plan)
 		return res, nil
 	}
+	startTime := time.Now()
 	id, _ := c.getConnectionID()
 	slog.Debug("Executing query", "connection id", id, "conid", c.connectionID)
 	c.connectionID = id
@@ -173,7 +240,14 @@ func (c *TiDBClient) ExecuteQueryWithMetrics(testScenario TestScenario) (*TestEx
 
 	// Count returned rows
 	var rowCount int64
+	var aVal, bVal int
+	var cVal string
 	for rows.Next() {
+		if rowCount == 0 {
+			if err := rows.Scan(&aVal, &bVal, &cVal); err != nil {
+				return nil, err
+			}
+		}
 		rowCount++
 	}
 
@@ -184,14 +258,31 @@ func (c *TiDBClient) ExecuteQueryWithMetrics(testScenario TestScenario) (*TestEx
 		return nil, err
 	}
 
-	res.PlanType = c.determinePlanType(plan)
-	res.PlanDetails = c.getPlanDetails(plan)
+	res.PlanType = determinePlanType(plan)
+
+	if isCoprCacheUsed(plan) {
+		if !retry {
+			return nil, fmt.Errorf("execution coprocessor cache is used")
+		}
+		b := strconv.Itoa(bVal)
+		slog.Info("coprocessor cache used, updating values", "value", b, "rowCount", rowCount, "a", aVal, "b", bVal, "c", cVal)
+		// cache is used, try to update all b values and then back again, to invalidate the cache
+		_, err = c.ExecuteQuery("UPDATE " + testScenario.TableName + " SET b = -313 where b = " + b)
+		if err != nil {
+			return nil, err
+		}
+		_, err = c.ExecuteQuery("UPDATE " + testScenario.TableName + " SET b = " + b + " where b = -313")
+		if err != nil {
+			return nil, err
+		}
+		return c.executeQueryWithMetrics(testScenario, false)
+	}
 	res.RowsReturned = rowCount
 	return res, nil
 }
 
 // determinePlanType analyzes the execution plan to determine if it's index lookup or table scan
-func (c *TiDBClient) determinePlanType(plan *ExecutionPlan) string {
+func determinePlanType(plan *ExecutionPlan) string {
 	if plan == nil {
 		return "unknown"
 	}
@@ -205,32 +296,33 @@ func (c *TiDBClient) determinePlanType(plan *ExecutionPlan) string {
 	}
 
 	// Check children for more specific information
-	for _, child := range plan.Children {
-		childType := c.determinePlanType(child)
-		if childType != "unknown" {
-			return childType
+	for plan = plan.Next; plan != nil; plan = plan.Next {
+		planType := determinePlanType(plan)
+		if planType != "unknown" {
+			return planType
 		}
 	}
 
 	return "unknown"
 }
 
-// getPlanDetails returns a summary of the execution plan
-func (c *TiDBClient) getPlanDetails(plan *ExecutionPlan) string {
+func isCoprCacheUsed(plan *ExecutionPlan) bool {
 	if plan == nil {
-		return "No plan available"
+		return false
 	}
 
-	var details []string
-	details = append(details, fmt.Sprintf("Root: %s", plan.OperatorInfo))
-	details = append(details, fmt.Sprintf("EstRows: %.2f", plan.EstRows))
-	details = append(details, fmt.Sprintf("EstCost: %.2f", plan.EstCost))
-
-	if plan.AccessObject != "" {
-		details = append(details, fmt.Sprintf("Access: %s", plan.AccessObject))
+	r, err := regexp.Compile(`copr_cache_hit_ratio: ([01]\.[0-9][0-9])`)
+	if err != nil {
+		return false
 	}
-
-	return strings.Join(details, ", ")
+	matches := r.FindAllStringSubmatch(plan.ExecutionInfo, -1)
+	for _, match := range matches {
+		if len(match) == 2 && match[1] != "0.00" {
+			slog.Info("copr_cache_hit_ratio match", "match", match)
+			return true
+		}
+	}
+	return isCoprCacheUsed(plan.Next)
 }
 
 // getConnectionID returns the current connection ID
@@ -255,116 +347,15 @@ func (c *TiDBClient) GetActualExecutionPlan() (*ExecutionPlan, error) {
 		return nil, fmt.Errorf("database connection not established")
 	}
 
-	// Use EXPLAIN FOR CONNECTION to get the actual plan
-	explainQuery := fmt.Sprintf("EXPLAIN FORMAT=\"brief\" FOR CONNECTION %d", c.connectionID)
-	//explainQuery := fmt.Sprintf("EXPLAIN FORMAT=\"tidb_json\" FOR CONNECTION %d", c.connectionID)
-	var explainBrief string
+	// Use EXPLAIN FOR CONNECTION to get the actual plan in tabular format
+	explainQuery := fmt.Sprintf("EXPLAIN FOR CONNECTION %d", c.connectionID)
 	slog.Debug("Executing query", "query", explainQuery)
-	err := c.db.QueryRow(explainQuery).Scan(&explainBrief)
+	rows, err := c.db.Query(explainQuery)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get actual execution plan: %w", err)
 	}
-	// Enable for simpler debugging...
-	fmt.Printf("\nEXPLAIN:\n%s\n\n", explainBrief)
+	defer rows.Close()
 
-	// Parse the TiDB JSON execution plan (returns an array)
-	var actualPlans []ActualExecutionPlan
-	if err := json.Unmarshal([]byte(explainBrief), &actualPlans); err != nil {
-		return nil, fmt.Errorf("failed to parse actual execution plan JSON: %w", err)
-	}
-
-	if len(actualPlans) == 0 {
-		return nil, fmt.Errorf("no actual execution plan found in JSON")
-	}
-
-	// Convert ActualExecutionPlan to ExecutionPlan
-	plan := c.convertActualToExecutionPlan(&actualPlans[0])
-	return plan, nil
-}
-
-// convertActualToExecutionPlan converts ActualExecutionPlan to ExecutionPlan
-func (c *TiDBClient) convertActualToExecutionPlan(actual *ActualExecutionPlan) *ExecutionPlan {
-	plan := &ExecutionPlan{
-		Task:         actual.Task,
-		OperatorInfo: actual.OperatorInfo,
-		ActTime:      actual.ActTime,
-		Memory:       actual.Memory,
-		Disk:         actual.Disk,
-		AccessObject: actual.AccessObject,
-		Details:      actual.Details,
-	}
-
-	// Convert ID from interface{} to int
-	if actual.ID != nil {
-		switch v := actual.ID.(type) {
-		case string:
-			plan.ID = v
-		case float64:
-			plan.ID = strconv.FormatFloat(v, 'f', -1, 64)
-		case int:
-			plan.ID = strconv.Itoa(v)
-		}
-	}
-
-	// Convert Count from interface{} to int64
-	if actual.Count != nil {
-		switch v := actual.Count.(type) {
-		case string:
-			if count, err := strconv.ParseInt(v, 10, 64); err == nil {
-				plan.Count = count
-			}
-		case float64:
-			plan.Count = int64(v)
-		case int64:
-			plan.Count = v
-		}
-	}
-
-	// Convert EstRows from interface{} to float64
-	if actual.EstRows != nil {
-		switch v := actual.EstRows.(type) {
-		case string:
-			if rows, err := strconv.ParseFloat(v, 64); err == nil {
-				plan.EstRows = rows
-			}
-		case float64:
-			plan.EstRows = v
-		}
-	}
-
-	// Convert EstCost from interface{} to float64
-	if actual.EstCost != nil {
-		switch v := actual.EstCost.(type) {
-		case string:
-			if cost, err := strconv.ParseFloat(v, 64); err == nil {
-				plan.EstCost = cost
-			}
-		case float64:
-			plan.EstCost = v
-		}
-	}
-
-	// Convert ActRows from interface{} to int64
-	if actual.ActRows != nil {
-		switch v := actual.ActRows.(type) {
-		case string:
-			if rows, err := strconv.ParseInt(v, 10, 64); err == nil {
-				plan.ActRows = rows
-			}
-		case float64:
-			plan.ActRows = int64(v)
-		case int64:
-			plan.ActRows = v
-		}
-	}
-
-	// Convert children recursively
-	if len(actual.Children) > 0 {
-		plan.Children = make([]*ExecutionPlan, len(actual.Children))
-		for i, child := range actual.Children {
-			plan.Children[i] = c.convertActualToExecutionPlan(child)
-		}
-	}
-
-	return plan
+	// Parse the tabular format execution plan
+	return c.parseTabularExecutionPlan(rows)
 }
