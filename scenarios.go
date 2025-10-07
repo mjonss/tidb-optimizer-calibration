@@ -188,6 +188,19 @@ func (r *ScenarioRunner) adjustSelectivities(tableName string, rowCount int, sel
 	}
 
 	batchSize := 50000
+	// First, update all with b < 1, to cleanup previous mess...
+	actualRowCount := 1
+	for actualRowCount > 0 {
+		_, err := r.client.ExecuteQuery(fmt.Sprintf("UPDATE %s SET b = %d WHERE b <= 0 LIMIT %d", tableName, rowCount+1, batchSize))
+		if err != nil {
+			return fmt.Errorf("failed to update negative b's: %v", err)
+		}
+		slog.Debug("Executing query", "query", fmt.Sprintf("SELECT COUNT(*) FROM %s where b <= 0", tableName))
+		err = r.client.db.QueryRow(fmt.Sprintf("SELECT COUNT(*) FROM %s where b <= 0", tableName)).Scan(&actualRowCount)
+		if err != nil {
+			return fmt.Errorf("failed to count rows: %v", err)
+		}
+	}
 	for i, sel := range selectivities {
 		// Calculate number of rows for this selectivity
 		rowsForThisSelectivity := rowsForSelectivities[i]
