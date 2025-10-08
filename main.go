@@ -125,16 +125,16 @@ func parseSelectivities(selectivitiesStr string) ([]float64, error) {
 			continue
 		}
 
-		// Try to parse as float (percentage)
-		if percentage, err := strconv.ParseFloat(part, 64); err == nil {
-			if percentage <= 0 || percentage > 100 {
-				return nil, fmt.Errorf("percentage must be between 0 and 100, got %f", percentage)
+		// Try to parse as float (ratio)
+		if ratio, err := strconv.ParseFloat(part, 64); err == nil {
+			if ratio <= 0.0 || ratio > 1.0 {
+				return nil, fmt.Errorf("ratio must be between 0 and 1.0, got %f", ratio)
 			}
-			selectivities = append(selectivities, percentage/100.0)
+			selectivities = append(selectivities, ratio)
 			continue
 		}
 
-		return nil, fmt.Errorf("invalid selectivity value '%s': must be percentage (0-100) or positive integer", part)
+		return nil, fmt.Errorf("invalid selectivity value '%s': must be a ratio (0-1.0) or positive integer", part)
 	}
 
 	if len(selectivities) == 0 {

@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math/rand"
 )
 
 const (
@@ -81,15 +82,17 @@ func (r *ScenarioRunner) generateTestData(tableName string, rowCount int, select
 
 // generateRandomData generates random data for the table
 func (r *ScenarioRunner) generateRandomData(tableName string, rowCount int) error {
-	fmt.Printf("📊 Generating %d rows of random data...\n", rowCount)
 	batchSize := 100000
+	fmt.Printf("📊 Generating %d rows of random data... (one dot = %d rows)\n", rowCount, batchSize)
 
-	tmpTable := fmt.Sprintf("create table tmp_%s (a int primary key)", tableName)
-	_, err := r.client.ExecuteQuery(tmpTable)
+	_, err := r.client.ExecuteQuery(fmt.Sprintf("drop table if exists tmp_%s", tableName))
 	if err != nil {
-		return fmt.Errorf("failed to insert random data batch: %v", err)
+		return fmt.Errorf("failed to drop tmp table: %v", err)
 	}
-	defer r.client.ExecuteQuery(fmt.Sprintf("drop table tmp_%s", tableName))
+	_, err = r.client.ExecuteQuery(fmt.Sprintf("create table tmp_%s (a int primary key)", tableName))
+	if err != nil {
+		return fmt.Errorf("failed to create tmp table: %v", err)
+	}
 	tmpInsert := fmt.Sprintf("insert into tmp_%s (a) values (1),(2),(3),(4),(5),(6),(7),(8),(9),(10)", tableName)
 	_, err = r.client.ExecuteQuery(tmpInsert)
 	if err != nil {
@@ -134,6 +137,12 @@ func (r *ScenarioRunner) generateRandomData(tableName string, rowCount int) erro
 			return fmt.Errorf("failed to insert random data batch: %v", err)
 		}
 		remainingRows -= currentBatchSize
+		fmt.Printf(".")
+	}
+	fmt.Printf("\n")
+	_, err = r.client.ExecuteQuery(fmt.Sprintf("drop table tmp_%s", tableName))
+	if err != nil {
+		return fmt.Errorf("failed to drop tmp table: %v", err)
 	}
 
 	// Validate that we have the correct number of rows
@@ -157,9 +166,22 @@ func (r *ScenarioRunner) generateRandomData(tableName string, rowCount int) erro
 	return nil
 }
 
+func getRandomNotInList(l []int) int {
+	for {
+		ret := rand.Intn(1000000) + 1
+		for i := range l {
+			if i == ret {
+				continue
+			}
+		}
+		return ret
+	}
+}
+
 // adjustSelectivities adjusts the data to have specific selectivity patterns
 func (r *ScenarioRunner) adjustSelectivities(tableName string, rowCount int, selectivities []float64) error {
-	fmt.Printf("🎯 Adjusting selectivities...\n")
+	batchSize := 50000
+	fmt.Printf("🎯 Adjusting selectivities... (one c/+/- is up to %d rows updated)\n", batchSize)
 
 	if len(selectivities) == 0 {
 		return errors.New("no selectivities given")
@@ -187,20 +209,25 @@ func (r *ScenarioRunner) adjustSelectivities(tableName string, rowCount int, sel
 		return errors.New("Total selectivity > 100%")
 	}
 
-	batchSize := 50000
-	// First, update all with b < 1, to cleanup previous mess...
-	actualRowCount := 1
-	for actualRowCount > 0 {
-		_, err := r.client.ExecuteQuery(fmt.Sprintf("UPDATE %s SET b = %d WHERE b <= 0 LIMIT %d", tableName, rowCount+1, batchSize))
-		if err != nil {
-			return fmt.Errorf("failed to update negative b's: %v", err)
-		}
+	var actualRowCount int
+	for {
 		slog.Debug("Executing query", "query", fmt.Sprintf("SELECT COUNT(*) FROM %s where b <= 0", tableName))
-		err = r.client.db.QueryRow(fmt.Sprintf("SELECT COUNT(*) FROM %s where b <= 0", tableName)).Scan(&actualRowCount)
+		err := r.client.db.QueryRow(fmt.Sprintf("SELECT COUNT(*) FROM %s where b <= 0", tableName)).Scan(&actualRowCount)
 		if err != nil {
 			return fmt.Errorf("failed to count rows: %v", err)
 		}
+		if actualRowCount == 0 {
+			break
+		}
+		b := getRandomNotInList(rowsForSelectivities)
+		_, err = r.client.ExecuteQuery(fmt.Sprintf("UPDATE %s SET b = %d WHERE b <= 0 LIMIT %d", tableName, b, batchSize))
+		if err != nil {
+			return fmt.Errorf("failed to clean up negative b's: %v", err)
+		}
+		fmt.Printf("c")
+
 	}
+
 	for i, sel := range selectivities {
 		// Calculate number of rows for this selectivity
 		rowsForThisSelectivity := rowsForSelectivities[i]
@@ -211,7 +238,6 @@ func (r *ScenarioRunner) adjustSelectivities(tableName string, rowCount int, sel
 		}
 
 		// If already have the correct number of rows, skip
-		var actualRowCount int
 		slog.Debug("Executing query", "query", fmt.Sprintf("SELECT COUNT(*) FROM %s where b = %d", tableName, rowsForThisSelectivity))
 		err := r.client.db.QueryRow(fmt.Sprintf("SELECT COUNT(*) FROM %s where b = %d", tableName, rowsForThisSelectivity)).Scan(&actualRowCount)
 		if err != nil {
@@ -222,17 +248,20 @@ func (r *ScenarioRunner) adjustSelectivities(tableName string, rowCount int, sel
 			continue
 		}
 
-		// First, set all rows to a unique value to avoid conflicts
-		for actualRowCount > 0 {
-			_, err = r.client.ExecuteQuery(fmt.Sprintf("UPDATE %s SET b = -1 WHERE b = %d LIMIT %d", tableName, rowsForThisSelectivity, batchSize))
+		// Too many rows
+		for actualRowCount > rowsForThisSelectivity {
+			b := getRandomNotInList(rowsForSelectivities)
+			_, err = r.client.ExecuteQuery(fmt.Sprintf(
+				"UPDATE %s SET b = %d WHERE b = %d ORDER BY RAND() LIMIT %d", tableName, b, rowsForThisSelectivity, batchSize))
 			if err != nil {
-				return fmt.Errorf("failed to prepare selectivity %d: %v", int(sel), err)
+				return fmt.Errorf("failed to decrease matching rows: %v", err)
 			}
 			slog.Debug("Executing query", "query", fmt.Sprintf("SELECT COUNT(*) FROM %s where b = %d", tableName, rowsForThisSelectivity))
 			err = r.client.db.QueryRow(fmt.Sprintf("SELECT COUNT(*) FROM %s where b = %d", tableName, rowsForThisSelectivity)).Scan(&actualRowCount)
 			if err != nil {
 				return fmt.Errorf("failed to count rows: %v", err)
 			}
+			fmt.Printf("-")
 		}
 
 		// Then update the required number of rows to the target value
@@ -249,8 +278,10 @@ func (r *ScenarioRunner) adjustSelectivities(tableName string, rowCount int, sel
 			if err != nil {
 				return fmt.Errorf("failed to count rows: %v", err)
 			}
+			fmt.Printf("+")
 		}
 	}
+	fmt.Printf("\n")
 
 	for i, sel := range selectivities {
 		// Verify the update was successful by counting rows with the target value
@@ -263,8 +294,8 @@ func (r *ScenarioRunner) adjustSelectivities(tableName string, rowCount int, sel
 		}
 
 		if actualRowsWithValue != rowsForThisSelectivity {
-			fmt.Printf("  - %d: Warning - Expected %d rows with value %d, got %d\n",
-				int(sel), rowsForThisSelectivity, rowsForThisSelectivity, actualRowsWithValue)
+			fmt.Printf("  - %f: Warning - Expected %d rows with value %d, got %d\n",
+				sel, rowsForThisSelectivity, rowsForThisSelectivity, actualRowsWithValue)
 		} else {
 			fmt.Printf("  - %f: ✅ %d rows set to value %d (verified)\n", sel, rowsForThisSelectivity, rowsForThisSelectivity)
 		}
