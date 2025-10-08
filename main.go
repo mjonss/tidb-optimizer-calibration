@@ -127,7 +127,7 @@ func parseSelectivities(selectivitiesStr string) ([]float64, error) {
 
 		// Try to parse as float (ratio)
 		if ratio, err := strconv.ParseFloat(part, 64); err == nil {
-			if ratio <= 0.0 || ratio > 1.0 {
+			if ratio <= 0.0 || ratio >= 1.0 {
 				return nil, fmt.Errorf("ratio must be between 0 and 1.0, got %f", ratio)
 			}
 			selectivities = append(selectivities, ratio)
