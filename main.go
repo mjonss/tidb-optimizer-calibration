@@ -417,7 +417,7 @@ func outputResultsTable(results []*TestExecutionResult) {
 			for i, pt := range planTypes {
 				fmt.Printf("%s-ru-min\t", pt)
 				fmt.Printf("%s-ru-avg\t", pt)
-				fmt.Printf("%s-ru-max", pt)
+				fmt.Printf("%s-ru-max\t", pt)
 				fmt.Printf("%s-min\t", pt)
 				fmt.Printf("%s-avg\t", pt)
 				fmt.Printf("%s-max", pt)
