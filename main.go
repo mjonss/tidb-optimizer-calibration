@@ -293,7 +293,7 @@ func runAllTestCombinations(scenarios []TestScenario, selectivities []float64, r
 
 	// Run all scenarios with repetitions and collect results
 	var results []*TestExecutionResult
-	totalScenarios := len(scenarios) * repetitions
+	totalScenarios := len(scenarios)
 	completed := 0
 
 	for _, scenario := range scenarios {
