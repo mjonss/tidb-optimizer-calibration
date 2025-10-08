@@ -413,6 +413,8 @@ func outputResultsTable(results []*TestExecutionResult) {
 		// Print header for this scenario
 		if i == 0 {
 			fmt.Printf("Scenario\t")
+			fmt.Printf("Table size\t")
+			fmt.Printf("Cardinality\t")
 			fmt.Printf("Choosen\t")
 			for i, pt := range planTypes {
 				fmt.Printf("%s-ru-min\t", pt)
@@ -428,7 +430,10 @@ func outputResultsTable(results []*TestExecutionResult) {
 				}
 			}
 		}
-		fmt.Printf("%s\t", scenarioID)
+		scenParts := strings.Split(scenarioID, "_")
+		fmt.Printf("%s\t", scenParts[0])
+		fmt.Printf("%s\t", scenParts[1])
+		fmt.Printf("%s\t", scenParts[2])
 		fmt.Printf("%s\t", explainOnlyPlanType)
 		for i, pt := range planTypes {
 			fmt.Printf("%.03f\t", RUMin[pt])
