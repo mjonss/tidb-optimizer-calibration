@@ -251,8 +251,9 @@ func (r *ScenarioRunner) adjustSelectivities(tableName string, rowCount int, sel
 		// Too many rows
 		for actualRowCount > rowsForThisSelectivity {
 			b := getRandomNotInList(rowsForSelectivities)
+			limit := min(actualRowCount-rowsForThisSelectivity, batchSize)
 			_, err = r.client.ExecuteQuery(fmt.Sprintf(
-				"UPDATE %s SET b = %d WHERE b = %d ORDER BY RAND() LIMIT %d", tableName, b, rowsForThisSelectivity, batchSize))
+				"UPDATE %s SET b = %d WHERE b = %d ORDER BY RAND() LIMIT %d", tableName, b, rowsForThisSelectivity, limit))
 			if err != nil {
 				return fmt.Errorf("failed to decrease matching rows: %v", err)
 			}
@@ -266,7 +267,7 @@ func (r *ScenarioRunner) adjustSelectivities(tableName string, rowCount int, sel
 
 		// Then update the required number of rows to the target value
 		for actualRowCount < rowsForThisSelectivity {
-			limit := min(rowsForThisSelectivity, batchSize)
+			limit := min(rowsForThisSelectivity-actualRowCount, batchSize)
 			_, err = r.client.ExecuteQuery(fmt.Sprintf(
 				"UPDATE %s SET b = %d %s ORDER BY RAND() LIMIT %d",
 				tableName, rowsForThisSelectivity, notIn, limit))
