@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"math/rand"
 	"os"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -343,6 +344,8 @@ func outputResultsTable(results []*TestExecutionResult) {
 	}
 	sort.Strings(scenarioIDs)
 
+	// {"txn_scope":"global","start_ts":461357749970665475,"for_update_ts":461357749970665475,"ru_consumption":1714.5729716536462}
+	ruRegex := regexp.MustCompile(`(?:"ru_consumption":)(\d+\.\d+)[^\d]`)
 	for i, scenarioID := range scenarioIDs {
 		group := scenarioMap[scenarioID]
 
@@ -350,6 +353,9 @@ func outputResultsTable(results []*TestExecutionResult) {
 		planTypeSum := make(map[string]time.Duration)
 		planTypeMin := make(map[string]time.Duration)
 		planTypeMax := make(map[string]time.Duration)
+		RUSum := make(map[string]float64)
+		RUMin := make(map[string]float64)
+		RUMax := make(map[string]float64)
 		planTypeCount := make(map[string]int)
 		explainOnlyPlanType := ""
 		for _, res := range group {
@@ -357,12 +363,29 @@ func outputResultsTable(results []*TestExecutionResult) {
 				explainOnlyPlanType = res.PlanType
 				continue
 			}
-			if minimum, ok := planTypeMin[res.PlanType]; !ok || minimum > res.ExecutionTime {
-				planTypeMin[res.PlanType] = res.ExecutionTime
+			var ru float64
+			matches := ruRegex.FindStringSubmatch(res.Plan.QueryInfo)
+			if len(matches) == 2 {
+				var err error
+				ru, err = strconv.ParseFloat(string(matches[1]), 64)
+				if err != nil {
+					fmt.Printf("Error converting %s to float: %v\n", string(matches[1]), err)
+				}
 			}
-			planTypeSum[res.PlanType] += res.ExecutionTime
-			if res.ExecutionTime > planTypeMax[res.PlanType] {
-				planTypeMax[res.PlanType] = res.ExecutionTime
+			if minimum, ok := RUMin[res.PlanType]; !ok || minimum > ru {
+				RUMin[res.PlanType] = ru
+			}
+			RUSum[res.PlanType] += ru
+			if ru > RUMax[res.PlanType] {
+				RUMax[res.PlanType] = ru
+			}
+			t := res.Plan.ExecutionTime
+			if minimum, ok := planTypeMin[res.PlanType]; !ok || minimum > t {
+				planTypeMin[res.PlanType] = t
+			}
+			planTypeSum[res.PlanType] += t
+			if t > planTypeMax[res.PlanType] {
+				planTypeMax[res.PlanType] = t
 			}
 			planTypeCount[res.PlanType]++
 		}
@@ -378,6 +401,10 @@ func outputResultsTable(results []*TestExecutionResult) {
 		sort.Strings(planTypes)
 
 		// Compute average time per plan type
+		avgRU := make(map[string]float64)
+		for pt, ruSum := range RUSum {
+			avgRU[pt] = ruSum / float64(planTypeCount[pt])
+		}
 		avgTimes := make(map[string]float64)
 		for pt, times := range planTypeSum {
 			avgTimes[pt] = times.Seconds() / float64(planTypeCount[pt])
@@ -386,11 +413,11 @@ func outputResultsTable(results []*TestExecutionResult) {
 		// Print header for this scenario
 		if i == 0 {
 			fmt.Printf("Scenario\t")
-			//for _, pt := range planTypes {
-			//	fmt.Printf("%s\t", pt)
-			//}
 			fmt.Printf("Choosen\t")
 			for i, pt := range planTypes {
+				fmt.Printf("%s-ru-min\t", pt)
+				fmt.Printf("%s-ru-avg\t", pt)
+				fmt.Printf("%s-ru-max", pt)
 				fmt.Printf("%s-min\t", pt)
 				fmt.Printf("%s-avg\t", pt)
 				fmt.Printf("%s-max", pt)
@@ -404,6 +431,9 @@ func outputResultsTable(results []*TestExecutionResult) {
 		fmt.Printf("%s\t", scenarioID)
 		fmt.Printf("%s\t", explainOnlyPlanType)
 		for i, pt := range planTypes {
+			fmt.Printf("%.03f\t", RUMin[pt])
+			fmt.Printf("%.03f\t", avgRU[pt])
+			fmt.Printf("%.03f\t", RUMax[pt])
 			fmt.Printf("%.03f\t", float64(planTypeMin[pt].Microseconds())/1000.0)
 			fmt.Printf("%.03f\t", avgTimes[pt]*1000)
 			fmt.Printf("%.03f", float64(planTypeMax[pt].Microseconds())/1000.0)

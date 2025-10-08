@@ -14,22 +14,27 @@ import (
 
 // TiDBClient represents a TiDB database client
 type TiDBClient struct {
-	db           *sql.DB
-	connectionID int
+	db             *sql.DB
+	dbPlan         *sql.DB
+	dbConnectionID int
 }
 
 type ExecutionPlan struct {
-	ID            string         `json:"id"`
-	Task          string         `json:"task"`
-	Count         int64          `json:"count"`
-	EstRows       float64        `json:"estRows"`
-	ActRows       int64          `json:"actRows"`
-	AccessObject  string         `json:"access object"`
-	OperatorInfo  string         `json:"operator info"`
-	ExecutionInfo string         `json:"execution info"`
-	Memory        string         `json:"memory"`
-	Disk          string         `json:"disk"`
-	Next          *ExecutionPlan `json:"next,omitempty"`
+	ID            string
+	Task          string
+	Count         int64
+	EstRows       float64
+	ActRows       int64
+	AccessObject  string
+	OperatorInfo  string
+	ExecutionInfo string
+	Memory        string
+	Disk          string
+	Next          *ExecutionPlan
+	bVal          int
+	rows          int
+	QueryInfo     string
+	ExecutionTime time.Duration
 }
 
 // TiDBConfig holds TiDB connection configuration
@@ -58,15 +63,29 @@ func (c *TiDBClient) Connect(config TiDBConfig) error {
 	}
 
 	// Test the connection
-	if err := db.Ping(); err != nil {
+	if err = db.Ping(); err != nil {
 		return fmt.Errorf("failed to ping database: %w", err)
 	}
 
 	c.db = db
-	c.connectionID, err = c.getConnectionID()
+	c.dbConnectionID, err = c.getConnectionID()
 	if err != nil {
 		return fmt.Errorf("failed to get connection ID: %w", err)
 	}
+
+	// Use a separate connection for EXPLAIN FOR CONNECTION,
+	// since it may destroy things like @@tidb_last_query_info
+	db, err = sql.Open("mysql", dsn)
+	if err != nil {
+		return fmt.Errorf("failed to open database connection: %w", err)
+	}
+
+	// Test the connection
+	if err = db.Ping(); err != nil {
+		return fmt.Errorf("failed to ping database: %w", err)
+	}
+
+	c.dbPlan = db
 	return nil
 }
 
@@ -80,8 +99,65 @@ func (c *TiDBClient) ExecuteQuery(query string) (*sql.Rows, error) {
 	return c.db.Query(query)
 }
 
-// GetExecutionPlan returns the execution plan for a query
-func (c *TiDBClient) GetExecutionPlan(query string) (*ExecutionPlan, error) {
+// ExecuteQueryWithPlanAndRU executes a SQL query and returns the result
+func (c *TiDBClient) ExecuteQueryGetPlan(query string) (*ExecutionPlan, error) {
+	if c.db == nil || c.dbPlan == nil {
+		return nil, fmt.Errorf("database connection not established")
+	}
+	slog.Debug("Executing query", "query", query)
+
+	id, err := c.getConnectionID()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get connection id: %w", err)
+	}
+	c.dbConnectionID = id
+	startTime := time.Now()
+	rows, err := c.db.Query(query)
+	if err != nil {
+		return nil, fmt.Errorf("failed to execute query: %w", err)
+	}
+	var aVal, bVal int
+	var cVal string
+	count := 0
+	for rows.Next() {
+		if count == 0 {
+			if err = rows.Scan(&aVal, &bVal, &cVal); err != nil {
+				_ = rows.Close()
+				return nil, err
+			}
+		}
+		count++
+	}
+	err = rows.Close()
+	elapsed := time.Since(startTime)
+	if err != nil {
+		return nil, fmt.Errorf("failed to close rows: %w", err)
+	}
+	rows, err = c.dbPlan.Query(fmt.Sprintf("EXPLAIN FOR CONNECTION %d", id))
+	if err != nil {
+		return nil, fmt.Errorf("failed to get actual execution plan: %w", err)
+	}
+	defer rows.Close()
+
+	// Parse the tabular format execution plan
+	plan, err := parseTabularExecutionPlan(rows)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse execution plan: %w", err)
+	}
+	var s string
+	err = c.db.QueryRow("select @@tidb_last_query_info").Scan(&s)
+	if err != nil {
+		return nil, fmt.Errorf("failed to to get last query info: %w", err)
+	}
+	plan.ExecutionTime = elapsed
+	plan.bVal = bVal
+	plan.QueryInfo = s
+	plan.rows = count
+	return plan, nil
+}
+
+// GetExplainPlan returns the execution plan for a query
+func (c *TiDBClient) GetExplainPlan(query string) (*ExecutionPlan, error) {
 	if c.db == nil {
 		return nil, fmt.Errorf("database connection not established")
 	}
@@ -96,7 +172,7 @@ func (c *TiDBClient) GetExecutionPlan(query string) (*ExecutionPlan, error) {
 	defer rows.Close()
 
 	// Parse the tabular format execution plan
-	return c.parseTabularExecutionPlan(rows)
+	return parseTabularExecutionPlan(rows)
 }
 
 // EXPLAIN that return 5 columns, like normal 'EXPLAIN SELECT * FROM t'
@@ -172,7 +248,7 @@ func getPlanFromExplainAnalyze(rows *sql.Rows) (*ExecutionPlan, error) {
 // Standard EXPLAIN format: id, estRows, task, access object, operator info
 
 // parseTabularExecutionPlan parses a tabular format execution plan
-func (c *TiDBClient) parseTabularExecutionPlan(rows *sql.Rows) (*ExecutionPlan, error) {
+func parseTabularExecutionPlan(rows *sql.Rows) (*ExecutionPlan, error) {
 	if !rows.Next() {
 		return nil, fmt.Errorf("no execution plan found")
 	}
@@ -198,6 +274,9 @@ func (c *TiDBClient) Close() error {
 	if c.db != nil {
 		return c.db.Close()
 	}
+	if c.dbPlan != nil {
+		return c.dbPlan.Close()
+	}
 	return nil
 }
 
@@ -218,7 +297,7 @@ func (c *TiDBClient) executeQueryWithMetrics(testScenario TestScenario, retry bo
 
 	if testScenario.ExplainOnly {
 		// Get execution plan first
-		plan, err := c.GetExecutionPlan(query)
+		plan, err := c.GetExplainPlan(query)
 		if err != nil {
 			return nil, err
 		}
@@ -226,48 +305,23 @@ func (c *TiDBClient) executeQueryWithMetrics(testScenario TestScenario, retry bo
 		res.PlanType = determinePlanType(plan)
 		return res, nil
 	}
-	startTime := time.Now()
-	id, _ := c.getConnectionID()
-	slog.Debug("Executing query", "connection id", id, "conid", c.connectionID)
-	c.connectionID = id
 
-	// Execute the query and count rows
-	rows, err := c.ExecuteQuery(query)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	// Count returned rows
-	var rowCount int64
-	var aVal, bVal int
-	var cVal string
-	for rows.Next() {
-		if rowCount == 0 {
-			if err := rows.Scan(&aVal, &bVal, &cVal); err != nil {
-				return nil, err
-			}
-		}
-		rowCount++
-	}
-
-	res.ExecutionTime = time.Since(startTime)
-
-	plan, err := c.GetActualExecutionPlan()
+	// Execute the query and get the plan
+	plan, err := c.ExecuteQueryGetPlan(query)
 	if err != nil {
 		return nil, err
 	}
 
+	res.Plan = plan
 	res.PlanType = determinePlanType(plan)
 
 	if isCoprCacheUsed(plan) {
 		if !retry {
 			return nil, fmt.Errorf("execution coprocessor cache is used")
 		}
-		b := strconv.Itoa(bVal)
-		slog.Info("coprocessor cache used, updating values", "value", b, "rowCount", rowCount, "a", aVal, "b", bVal, "c", cVal)
 		// cache is used, try to update all b values and then back again, to invalidate the cache
 		var count int
+		b := strconv.Itoa(plan.bVal)
 		_, err = c.ExecuteQuery("UPDATE " + testScenario.TableName + " SET b = -313 where b = " + b + " ORDER BY rand() LIMIT 50000")
 		if err != nil {
 			return nil, err
@@ -287,7 +341,6 @@ func (c *TiDBClient) executeQueryWithMetrics(testScenario TestScenario, retry bo
 		}
 		return c.executeQueryWithMetrics(testScenario, false)
 	}
-	res.RowsReturned = rowCount
 	return res, nil
 }
 
@@ -349,23 +402,4 @@ func (c *TiDBClient) getConnectionID() (int, error) {
 	}
 
 	return connectionID, nil
-}
-
-// GetActualExecutionPlan returns the actual execution plan for a connection
-func (c *TiDBClient) GetActualExecutionPlan() (*ExecutionPlan, error) {
-	if c.db == nil {
-		return nil, fmt.Errorf("database connection not established")
-	}
-
-	// Use EXPLAIN FOR CONNECTION to get the actual plan in tabular format
-	explainQuery := fmt.Sprintf("EXPLAIN FOR CONNECTION %d", c.connectionID)
-	slog.Debug("Executing query", "query", explainQuery)
-	rows, err := c.db.Query(explainQuery)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get actual execution plan: %w", err)
-	}
-	defer rows.Close()
-
-	// Parse the tabular format execution plan
-	return c.parseTabularExecutionPlan(rows)
 }

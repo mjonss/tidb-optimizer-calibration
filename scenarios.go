@@ -157,7 +157,6 @@ func (r *ScenarioRunner) generateRandomData(tableName string, rowCount int) erro
 		return fmt.Errorf("expected %d rows, got %d rows", rowCount, actualRowCount)
 	}
 
-	slog.Debug("Executing query", "query", fmt.Sprintf("ANALYZE TABLE %s", tableName))
 	_, err = r.client.ExecuteQuery(fmt.Sprintf("ANALYZE TABLE %s", tableName))
 	if err != nil {
 		return fmt.Errorf("failed to count rows: %v", err)

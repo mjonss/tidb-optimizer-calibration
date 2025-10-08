@@ -18,14 +18,13 @@ type TestScenario struct {
 
 // TestExecutionResult represents the result of executing a test query
 type TestExecutionResult struct {
-	ScenarioID    string        `json:"scenario_id"`
-	Variant       string        `json:"variant"`
-	Query         string        `json:"query"`
-	ExecutionTime time.Duration `json:"execution_time"`
-	PlanType      string        `json:"plan_type"`
-	PlanDetails   string        `json:"plan_details"`
-	RowsReturned  int64         `json:"rows_returned"`
-	ExplainOnly   bool          `json:"explain_only"`
+	ScenarioID    string
+	Variant       string
+	Query         string
+	ExecutionTime time.Duration
+	PlanType      string
+	Plan          *ExecutionPlan
+	ExplainOnly   bool
 }
 
 // GetNumRows return number of matching rows from table rows vs selectivity
