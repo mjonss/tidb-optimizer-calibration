@@ -49,12 +49,12 @@ func main() {
 	slog.Debug("Selectivity values to test", "selectivities", selValues)
 
 	err = CheckAndSetupTables(rows, selValues, *fillerSize)
-	// Run comprehensive optimizer tests
-	results := RunOptimizerTests(rows, selValues, *repetitions)
 	if err != nil {
-		slog.Error("Failed to run optimizer tests", "error", err)
+		slog.Error("Failed to create all the tables", "error", err)
 		os.Exit(1)
 	}
+	// Run comprehensive optimizer tests
+	results := RunOptimizerTests(rows, selValues, *repetitions)
 
 	if *detailedOutput {
 		outputDetailedResultsTable(results)
