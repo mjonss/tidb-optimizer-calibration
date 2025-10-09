@@ -247,7 +247,7 @@ func RunOptimizerTests(rowCounts []int, selectivities []float64, repetitions int
 	// Display selectivities in a readable format
 	selStrs := make([]string, len(selectivities))
 	for i, sel := range selectivities {
-		selStrs[i] = strconv.Itoa(int(sel))
+		selStrs[i] = fmt.Sprintf("%f", sel)
 	}
 	fmt.Printf("Selectivity: %s\n", strings.Join(selStrs, ", "))
 
