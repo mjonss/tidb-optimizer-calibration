@@ -52,10 +52,23 @@ func NewTiDBClient() *TiDBClient {
 	return &TiDBClient{}
 }
 
+var defaultTiDBConfig = TiDBConfig{
+	Host:     "localhost",
+	Port:     4000,
+	User:     "root",
+	Password: "",
+	Database: "test",
+	Timeout:  30 * time.Second,
+}
+
 // Connect establishes a connection to TiDB
-func (c *TiDBClient) Connect(config TiDBConfig) error {
+func (c *TiDBClient) Connect(config *TiDBConfig) error {
+	if config == nil {
+		config = &defaultTiDBConfig
+	}
 	dsn := fmt.Sprintf("%s:%s@tcp(%s:%d)/%s?timeout=%s&parseTime=true",
 		config.User, config.Password, config.Host, config.Port, config.Database, config.Timeout)
+	slog.Debug("TiDB connection config", "host", config.Host, "port", config.Port, "database", config.Database)
 
 	db, err := sql.Open("mysql", dsn)
 	if err != nil {
@@ -154,6 +167,19 @@ func (c *TiDBClient) ExecuteQueryGetPlan(query string) (*ExecutionPlan, error) {
 	plan.QueryInfo = s
 	plan.rows = count
 	return plan, nil
+}
+
+// GetTableRowCount returns number of rows in a table, or error if not exists
+func (c *TiDBClient) GetTableRowCount(tableName string) (int, error) {
+	// Get current row count
+	var rowCount int
+	slog.Debug("Executing query", "query", fmt.Sprintf("SELECT COUNT(*) FROM %s", tableName))
+	err := c.db.QueryRow(fmt.Sprintf("SELECT COUNT(*) FROM %s", tableName)).Scan(&rowCount)
+	if err != nil {
+		return 0, fmt.Errorf("failed to count rows in table: %v", err)
+	}
+
+	return rowCount, nil
 }
 
 // GetExplainPlan returns the execution plan for a query

@@ -11,68 +11,70 @@ const (
 	IndexVsTableSchemaFmt = "CREATE TABLE %s (id int AUTO_INCREMENT PRIMARY KEY, b int, c varchar(255), KEY (b))"
 )
 
-// ScenarioRunner executes test scenarios against TiDB
-type ScenarioRunner struct {
-	client *TiDBClient
-}
+func CheckAndSetupTables(rowCounts []int, selectivities []float64) error {
+	c := NewTiDBClient()
 
-// NewScenarioRunner creates a new scenario runner
-func NewScenarioRunner(client *TiDBClient) *ScenarioRunner {
-	return &ScenarioRunner{
-		client: client,
-	}
-}
-
-// checkTableStatus checks if a table exists and returns its row count
-func (r *ScenarioRunner) checkTableStatus(tableName string) (int, error) {
-	// Get current row count
-	var rowCount int
-	slog.Debug("Executing query", "query", fmt.Sprintf("SELECT COUNT(*) FROM %s", tableName))
-	err := r.client.db.QueryRow(fmt.Sprintf("SELECT COUNT(*) FROM %s", tableName)).Scan(&rowCount)
+	err := c.Connect(nil)
 	if err != nil {
-		return 0, fmt.Errorf("failed to count rows in table: %v", err)
+		return err
 	}
+	defer c.Close()
 
-	return rowCount, nil
+	// TODO: Try to reuse mjonss/tidb_data_generator for creating the tables faster
+	// TODO: When inserting, try to set the selectivities already there, so it just needs fine tuning later
+	for _, rows := range rowCounts {
+		tableName := fmt.Sprintf("t%s", formatRowCountName(rows))
+		err = generateTestData(c, tableName, rows, selectivities)
+		if err != nil {
+			return err
+		}
+		err = adjustSelectivities(c, tableName, rows, selectivities)
+		if err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // generateTestData generates test data with varying selectivity patterns
-func (r *ScenarioRunner) generateTestData(tableName string, rowCount int, selectivities []float64) error {
+func generateTestData(c *TiDBClient, tableName string, rowCount int, selectivities []float64) error {
+	fmt.Printf("✅ Checking table %s\n", tableName)
 	// Check if table exists and has correct number of rows
 	recreateTable := false
-	currentRowCount, err := r.checkTableStatus(tableName)
+	currentRowCount, err := c.GetTableRowCount(tableName)
 	if err != nil {
 		recreateTable = true
 	}
 
 	if recreateTable {
-		slog.Debug("Executing query", "query", fmt.Sprintf("SELECT COUNT(*) FROM %s", tableName))
-		_, err = r.client.ExecuteQuery(fmt.Sprintf("DROP TABLE IF EXISTS %s", tableName))
+		_, err = c.ExecuteQuery(fmt.Sprintf("DROP TABLE IF EXISTS %s", tableName))
 		if err != nil {
 			return fmt.Errorf("failed to clear existing data: %v", err)
 		}
 		createStmt := fmt.Sprintf(IndexVsTableSchemaFmt, tableName)
-		_, err = r.client.ExecuteQuery(createStmt)
+		_, err = c.ExecuteQuery(createStmt)
 		if err != nil {
 			return fmt.Errorf("failed to create table %s: %w", tableName, err)
 		}
 	}
 
 	if currentRowCount != rowCount {
-		_, err := r.client.ExecuteQuery(fmt.Sprintf("TRUNCATE TABLE %s", tableName))
-		if err != nil {
-			return fmt.Errorf("failed to clear existing data: %v", err)
+		if !recreateTable {
+			_, err = c.ExecuteQuery(fmt.Sprintf("TRUNCATE TABLE %s", tableName))
+			if err != nil {
+				return fmt.Errorf("failed to clear existing data: %v", err)
+			}
 		}
 
 		// Generate random data
-		err = r.generateRandomData(tableName, rowCount)
+		err = generateRandomData(c, tableName, rowCount, selectivities)
 		if err != nil {
 			return fmt.Errorf("failed to generate random data: %v", err)
 		}
 	}
 
 	// Adjust selectivities
-	err = r.adjustSelectivities(tableName, rowCount, selectivities)
+	err = adjustSelectivities(c, tableName, rowCount, selectivities)
 	if err != nil {
 		return fmt.Errorf("failed to adjust selectivities: %v", err)
 	}
@@ -81,20 +83,20 @@ func (r *ScenarioRunner) generateTestData(tableName string, rowCount int, select
 }
 
 // generateRandomData generates random data for the table
-func (r *ScenarioRunner) generateRandomData(tableName string, rowCount int) error {
+func generateRandomData(c *TiDBClient, tableName string, rowCount int, _ []float64) error {
 	batchSize := 100000
 	fmt.Printf("📊 Generating %d rows of random data... (one dot = %d rows)\n", rowCount, batchSize)
 
-	_, err := r.client.ExecuteQuery(fmt.Sprintf("drop table if exists tmp_%s", tableName))
+	_, err := c.ExecuteQuery(fmt.Sprintf("drop table if exists tmp_%s", tableName))
 	if err != nil {
 		return fmt.Errorf("failed to drop tmp table: %v", err)
 	}
-	_, err = r.client.ExecuteQuery(fmt.Sprintf("create table tmp_%s (a int primary key)", tableName))
+	_, err = c.ExecuteQuery(fmt.Sprintf("create table tmp_%s (a int primary key)", tableName))
 	if err != nil {
 		return fmt.Errorf("failed to create tmp table: %v", err)
 	}
 	tmpInsert := fmt.Sprintf("insert into tmp_%s (a) values (1),(2),(3),(4),(5),(6),(7),(8),(9),(10)", tableName)
-	_, err = r.client.ExecuteQuery(tmpInsert)
+	_, err = c.ExecuteQuery(tmpInsert)
 	if err != nil {
 		return fmt.Errorf("failed to insert random data batch: %v", err)
 	}
@@ -109,30 +111,31 @@ func (r *ScenarioRunner) generateRandomData(tableName string, rowCount int) erro
 		// Check current row count
 		currentBatchSize := batchSize
 
-		var currentRowCount int
-		slog.Debug("Executing query", "query", fmt.Sprintf("SELECT COUNT(*) FROM %s", tableName))
-		err := r.client.db.QueryRow(fmt.Sprintf("SELECT COUNT(*) FROM %s", tableName)).Scan(&currentRowCount)
-		if err != nil {
-			return fmt.Errorf("failed to count current rows: %v", err)
-		}
-		slog.Debug("Current row count", "currentRowCount", currentRowCount)
-
-		if currentRowCount >= rowCount {
-			break
-		}
-
-		if remainingRows <= batchSize {
-			// Calculate how many more rows we need:w
-
-			remainingRows := rowCount - currentRowCount
-			if remainingRows < currentBatchSize {
-				currentBatchSize = remainingRows
+		if remainingRows <= 0 {
+			var currentRowCount int
+			slog.Debug("Executing query", "query", fmt.Sprintf("SELECT COUNT(*) FROM %s", tableName))
+			err := c.db.QueryRow(fmt.Sprintf("SELECT COUNT(*) FROM %s", tableName)).Scan(&currentRowCount)
+			if err != nil {
+				return fmt.Errorf("failed to count current rows: %v", err)
 			}
+			slog.Debug("Current row count", "currentRowCount", currentRowCount)
+
+			if currentRowCount >= rowCount {
+				if currentRowCount > rowCount {
+					slog.Warn("Too many rows in table", "currentRowCount", currentRowCount, "rowCount", rowCount)
+				}
+				break
+			}
+
+			remainingRows = rowCount - currentRowCount
+			currentBatchSize = min(batchSize, remainingRows)
 		}
 
+		// TODO: Generate b values conforming to the seletivities
+		// TODO: Maybe use the mjonss/tidb_data_generator here, instead to speed it up
 		// Generate batch insert with random ID and values using INSERT IGNORE
 		query := fmt.Sprintf("INSERT IGNORE INTO %s (b,c) SELECT FLOOR(RAND() * 1000000), rand() * 1000000000 FROM %s LIMIT %d", tableName, tmpTbls, currentBatchSize)
-		_, err = r.client.ExecuteQuery(query)
+		_, err = c.ExecuteQuery(query)
 		if err != nil {
 			return fmt.Errorf("failed to insert random data batch: %v", err)
 		}
@@ -140,7 +143,7 @@ func (r *ScenarioRunner) generateRandomData(tableName string, rowCount int) erro
 		fmt.Printf(".")
 	}
 	fmt.Printf("\n")
-	_, err = r.client.ExecuteQuery(fmt.Sprintf("drop table tmp_%s", tableName))
+	_, err = c.ExecuteQuery(fmt.Sprintf("drop table tmp_%s", tableName))
 	if err != nil {
 		return fmt.Errorf("failed to drop tmp table: %v", err)
 	}
@@ -148,7 +151,7 @@ func (r *ScenarioRunner) generateRandomData(tableName string, rowCount int) erro
 	// Validate that we have the correct number of rows
 	var actualRowCount int
 	slog.Debug("Executing query", "query", fmt.Sprintf("SELECT COUNT(*) FROM %s", tableName))
-	err = r.client.db.QueryRow(fmt.Sprintf("SELECT COUNT(*) FROM %s", tableName)).Scan(&actualRowCount)
+	err = c.db.QueryRow(fmt.Sprintf("SELECT COUNT(*) FROM %s", tableName)).Scan(&actualRowCount)
 	if err != nil {
 		return fmt.Errorf("failed to count rows: %v", err)
 	}
@@ -157,7 +160,7 @@ func (r *ScenarioRunner) generateRandomData(tableName string, rowCount int) erro
 		return fmt.Errorf("expected %d rows, got %d rows", rowCount, actualRowCount)
 	}
 
-	_, err = r.client.ExecuteQuery(fmt.Sprintf("ANALYZE TABLE %s", tableName))
+	_, err = c.ExecuteQuery(fmt.Sprintf("ANALYZE TABLE %s", tableName))
 	if err != nil {
 		return fmt.Errorf("failed to count rows: %v", err)
 	}
@@ -178,7 +181,7 @@ func getRandomNotInList(l []int) int {
 }
 
 // adjustSelectivities adjusts the data to have specific selectivity patterns
-func (r *ScenarioRunner) adjustSelectivities(tableName string, rowCount int, selectivities []float64) error {
+func adjustSelectivities(c *TiDBClient, tableName string, rowCount int, selectivities []float64) error {
 	batchSize := 50000
 	fmt.Printf("🎯 Adjusting selectivities... (one c/+/- is up to %d rows updated)\n", batchSize)
 
@@ -211,7 +214,7 @@ func (r *ScenarioRunner) adjustSelectivities(tableName string, rowCount int, sel
 	var actualRowCount int
 	for {
 		slog.Debug("Executing query", "query", fmt.Sprintf("SELECT COUNT(*) FROM %s where b <= 0", tableName))
-		err := r.client.db.QueryRow(fmt.Sprintf("SELECT COUNT(*) FROM %s where b <= 0", tableName)).Scan(&actualRowCount)
+		err := c.db.QueryRow(fmt.Sprintf("SELECT COUNT(*) FROM %s where b <= 0", tableName)).Scan(&actualRowCount)
 		if err != nil {
 			return fmt.Errorf("failed to count rows: %v", err)
 		}
@@ -219,7 +222,7 @@ func (r *ScenarioRunner) adjustSelectivities(tableName string, rowCount int, sel
 			break
 		}
 		b := getRandomNotInList(rowsForSelectivities)
-		_, err = r.client.ExecuteQuery(fmt.Sprintf("UPDATE %s SET b = %d WHERE b <= 0 LIMIT %d", tableName, b, batchSize))
+		_, err = c.ExecuteQuery(fmt.Sprintf("UPDATE %s SET b = %d WHERE b <= 0 LIMIT %d", tableName, b, batchSize))
 		if err != nil {
 			return fmt.Errorf("failed to clean up negative b's: %v", err)
 		}
@@ -238,7 +241,7 @@ func (r *ScenarioRunner) adjustSelectivities(tableName string, rowCount int, sel
 
 		// If already have the correct number of rows, skip
 		slog.Debug("Executing query", "query", fmt.Sprintf("SELECT COUNT(*) FROM %s where b = %d", tableName, rowsForThisSelectivity))
-		err := r.client.db.QueryRow(fmt.Sprintf("SELECT COUNT(*) FROM %s where b = %d", tableName, rowsForThisSelectivity)).Scan(&actualRowCount)
+		err := c.db.QueryRow(fmt.Sprintf("SELECT COUNT(*) FROM %s where b = %d", tableName, rowsForThisSelectivity)).Scan(&actualRowCount)
 		if err != nil {
 			return fmt.Errorf("failed to count rows: %v", err)
 		}
@@ -251,13 +254,13 @@ func (r *ScenarioRunner) adjustSelectivities(tableName string, rowCount int, sel
 		for actualRowCount > rowsForThisSelectivity {
 			b := getRandomNotInList(rowsForSelectivities)
 			limit := min(actualRowCount-rowsForThisSelectivity, batchSize)
-			_, err = r.client.ExecuteQuery(fmt.Sprintf(
+			_, err = c.ExecuteQuery(fmt.Sprintf(
 				"UPDATE %s SET b = %d WHERE b = %d ORDER BY RAND() LIMIT %d", tableName, b, rowsForThisSelectivity, limit))
 			if err != nil {
 				return fmt.Errorf("failed to decrease matching rows: %v", err)
 			}
 			slog.Debug("Executing query", "query", fmt.Sprintf("SELECT COUNT(*) FROM %s where b = %d", tableName, rowsForThisSelectivity))
-			err = r.client.db.QueryRow(fmt.Sprintf("SELECT COUNT(*) FROM %s where b = %d", tableName, rowsForThisSelectivity)).Scan(&actualRowCount)
+			err = c.db.QueryRow(fmt.Sprintf("SELECT COUNT(*) FROM %s where b = %d", tableName, rowsForThisSelectivity)).Scan(&actualRowCount)
 			if err != nil {
 				return fmt.Errorf("failed to count rows: %v", err)
 			}
@@ -267,14 +270,14 @@ func (r *ScenarioRunner) adjustSelectivities(tableName string, rowCount int, sel
 		// Then update the required number of rows to the target value
 		for actualRowCount < rowsForThisSelectivity {
 			limit := min(rowsForThisSelectivity-actualRowCount, batchSize)
-			_, err = r.client.ExecuteQuery(fmt.Sprintf(
+			_, err = c.ExecuteQuery(fmt.Sprintf(
 				"UPDATE %s SET b = %d %s ORDER BY RAND() LIMIT %d",
 				tableName, rowsForThisSelectivity, notIn, limit))
 			if err != nil {
 				return fmt.Errorf("failed to set selectivity %d: %v", int(sel), err)
 			}
 			slog.Debug("Executing query", "query", fmt.Sprintf("SELECT COUNT(*) FROM %s where b = %d", tableName, rowsForThisSelectivity))
-			err = r.client.db.QueryRow(fmt.Sprintf("SELECT COUNT(*) FROM %s where b = %d", tableName, rowsForThisSelectivity)).Scan(&actualRowCount)
+			err = c.db.QueryRow(fmt.Sprintf("SELECT COUNT(*) FROM %s where b = %d", tableName, rowsForThisSelectivity)).Scan(&actualRowCount)
 			if err != nil {
 				return fmt.Errorf("failed to count rows: %v", err)
 			}
@@ -288,7 +291,7 @@ func (r *ScenarioRunner) adjustSelectivities(tableName string, rowCount int, sel
 		rowsForThisSelectivity := rowsForSelectivities[i]
 		var actualRowsWithValue int
 		slog.Debug("Executing query", "query", fmt.Sprintf("SELECT COUNT(*) FROM %s WHERE b = %d", tableName, rowsForThisSelectivity))
-		err := r.client.db.QueryRow(fmt.Sprintf("SELECT COUNT(*) FROM %s WHERE b = %d", tableName, rowsForThisSelectivity)).Scan(&actualRowsWithValue)
+		err := c.db.QueryRow(fmt.Sprintf("SELECT COUNT(*) FROM %s WHERE b = %d", tableName, rowsForThisSelectivity)).Scan(&actualRowsWithValue)
 		if err != nil {
 			return fmt.Errorf("failed to verify selectivity %f: %v", sel, err)
 		}
@@ -301,7 +304,7 @@ func (r *ScenarioRunner) adjustSelectivities(tableName string, rowCount int, sel
 		}
 	}
 
-	_, err := r.client.ExecuteQuery(fmt.Sprintf("ANALYZE TABLE %s", tableName))
+	_, err := c.ExecuteQuery(fmt.Sprintf("ANALYZE TABLE %s", tableName))
 	if err != nil {
 		return fmt.Errorf("failed to count rows: %v", err)
 	}
@@ -310,9 +313,9 @@ func (r *ScenarioRunner) adjustSelectivities(tableName string, rowCount int, sel
 }
 
 // setupTableWithData creates a table with the standard schema and populates it with data
-func (r *ScenarioRunner) setupTableWithData(tableName string, rowCount int, selectivities []float64) error {
+func setupTableWithData(c *TiDBClient, tableName string, rowCount int, selectivities []float64) error {
 	// Check if table already exists with correct row count
-	err := r.generateTestData(tableName, rowCount, selectivities)
+	err := generateTestData(c, tableName, rowCount, selectivities)
 	if err != nil {
 		return fmt.Errorf("failed to populate table %s: %w", tableName, err)
 	}

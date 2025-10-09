@@ -11,10 +11,9 @@ func TestSimple(t *testing.T) {
 
 	// Run the optimizer tests
 	setupLogging("debug")
-	err := RunOptimizerTests(rowCounts, selectivities, 1)
-	if err != nil {
-		t.Fatalf("RunOptimizerTests failed: %v", err)
-	}
+	results := RunOptimizerTests(rowCounts, selectivities, 1)
+	outputDetailedResultsTable(results)
+	outputAggregatedResultsTable(results)
 }
 
 func TestMulti(t *testing.T) {

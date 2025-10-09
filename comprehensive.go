@@ -2,7 +2,6 @@ package main
 
 import (
 	"fmt"
-	"time"
 )
 
 // TestScenario represents a test scenario for optimizer validation
@@ -18,13 +17,12 @@ type TestScenario struct {
 
 // TestExecutionResult represents the result of executing a test query
 type TestExecutionResult struct {
-	ScenarioID    string
-	Variant       string
-	Query         string
-	ExecutionTime time.Duration
-	PlanType      string
-	Plan          *ExecutionPlan
-	ExplainOnly   bool
+	ScenarioID  string
+	Variant     string
+	Query       string
+	PlanType    string
+	Plan        *ExecutionPlan
+	ExplainOnly bool
 }
 
 // GetNumRows return number of matching rows from table rows vs selectivity

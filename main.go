@@ -13,12 +13,19 @@ import (
 	"time"
 )
 
+const (
+	ruRegexStr = `(?:"ru_consumption":)(\d+\.\d+)[^\d]`
+)
+
 func main() {
 	// Parse command line flags
-	var logLevel = flag.String("log-level", "info", "Log level: debug, info, warn, error")
-	var rowCounts = flag.String("rows", "1,10,100,1K,10K,100K,1M,10M", "Comma-separated list of row counts to test (e.g., 1,100,10000)")
-	var selectivities = flag.String("selectivity", "50.0,25.0,12.5,6.25,3.125,1.5625,0.78125,0.390625,0.1953125", "Comma-separated list of selectivity values (percentages or row counts, e.g., 50,25,12.5 or 100,50,25)")
-	var repetitions = flag.Int("repetitions", 1, "Number of times to repeat each scenario")
+	var logLevel = flag.String("l", "info", "Log level: debug, info, warn, error")
+	var rowCounts = flag.String("s", "1K,1M", "Comma-separated list of table sizes to test (e.g., 1,100,10000)")
+	var selectivities = flag.String("c", "50.0,25.0,12.5,6.25,3.125,1.5625,0.78125,0.390625,0.1953125", "Comma-separated list of selectivity/cardinality values (Selectivity: ratio (0.0-1.0) or Cardinality: row counts. E.g., 0.3,0.1,100,50,25)")
+	var repetitions = flag.Int("n", 1, "Number of times to repeat each test")
+	var detailedOutput = flag.Bool("d", true, "Detailed output, one line per test run")
+	var aggregatedOutput = flag.Bool("a", false, "Aggregated output, per test")
+
 	flag.Parse()
 
 	// Set up structured logging with slog
@@ -38,19 +45,23 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Run TiDB Optimizer Calibration Tool
-	slog.Info("Starting TiDB Optimizer Calibration Tool")
-	slog.Info("======================================")
-	slog.Info("Row counts to test", "rows", rows)
-	slog.Info("Selectivity values to test", "selectivities", selValues)
+	slog.Debug("Row counts to test", "rows", rows)
+	slog.Debug("Selectivity values to test", "selectivities", selValues)
 
+	err = CheckAndSetupTables(rows, selValues)
 	// Run comprehensive optimizer tests
-	err = RunOptimizerTests(rows, selValues, *repetitions)
+	results := RunOptimizerTests(rows, selValues, *repetitions)
 	if err != nil {
 		slog.Error("Failed to run optimizer tests", "error", err)
 		os.Exit(1)
 	}
 
+	if *detailedOutput {
+		outputDetailedResultsTable(results)
+	}
+	if *aggregatedOutput {
+		outputAggregatedResultsTable(results)
+	}
 	fmt.Println("\n✅ TiDB Optimizer Calibration completed successfully!")
 }
 
@@ -216,7 +227,7 @@ func setupLogging(level string) {
 }
 
 // RunOptimizerTests runs comprehensive optimizer calibration tests
-func RunOptimizerTests(rowCounts []int, selectivities []float64, repetitions int) error {
+func RunOptimizerTests(rowCounts []int, selectivities []float64, repetitions int) []*TestExecutionResult {
 	slog.Info("Running TiDB Optimizer Calibration Tests")
 	slog.Info("======================================")
 
@@ -246,47 +257,31 @@ func RunOptimizerTests(rowCounts []int, selectivities []float64, repetitions int
 	fmt.Println("================================================")
 
 	// Run all test combinations with real execution
-	runAllTestCombinations(scenarios, selectivities, repetitions)
-
-	return nil
+	return runAllTestCombinations(scenarios)
 }
 
 // runAllTestCombinations runs all test combinations against a real TiDB cluster
-func runAllTestCombinations(scenarios []TestScenario, selectivities []float64, repetitions int) {
+func runAllTestCombinations(scenarios []TestScenario) []*TestExecutionResult {
 
 	slog.Info("Connecting to TiDB cluster", "scenarios", len(scenarios))
 	fmt.Printf("Connecting to TiDB cluster and executing %d test scenarios...\n", len(scenarios))
 	fmt.Println()
 
-	// Connect to TiDB
-	config := TiDBConfig{
-		Host:     "localhost",
-		Port:     4000,
-		User:     "root",
-		Password: "",
-		Database: "test",
-		Timeout:  30 * time.Second,
-	}
-
-	slog.Debug("TiDB connection config", "host", config.Host, "port", config.Port, "database", config.Database)
 	client := NewTiDBClient()
 
-	err := client.Connect(config)
+	err := client.Connect(nil)
 	if err != nil {
 		slog.Error("Failed to connect to TiDB", "error", err)
 		fmt.Printf("❌ Failed to connect to TiDB: %v\n", err)
 		fmt.Println("Please ensure TiDB is running on localhost:4000")
 		fmt.Println("You can start TiDB with: tiup playground")
-		return
+		return nil
 	}
 	defer client.Close()
 
 	slog.Info("Connected to TiDB cluster successfully")
 	fmt.Println("✅ Connected to TiDB cluster successfully!")
 	fmt.Println()
-
-	// Create test runner with the connected client and selectivities
-	testRunner := NewTestRunner(client, selectivities)
 
 	rand.Shuffle(len(scenarios), func(i, j int) {
 		scenarios[i], scenarios[j] = scenarios[j], scenarios[i]
@@ -299,7 +294,6 @@ func runAllTestCombinations(scenarios []TestScenario, selectivities []float64, r
 
 	for _, scenario := range scenarios {
 		if completed%10 == 0 {
-			slog.Info("Test progress", "completed", completed, "total", totalScenarios)
 			fmt.Printf("Progress: %d/%d scenarios completed\n", completed, totalScenarios)
 		}
 		completed++
@@ -307,13 +301,12 @@ func runAllTestCombinations(scenarios []TestScenario, selectivities []float64, r
 		slog.Debug("Executing scenario", "id", scenario.ID, "query", scenario.Query)
 
 		// Execute real test with actual TiDB and capture actual execution plan
-		result, err := testRunner.RunScenarioWithActualPlan(scenario)
+		result, err := client.ExecuteQueryWithMetrics(scenario)
 		if err != nil {
-			slog.Error("Error running scenario", "scenario_id", scenario.ID, "error", err)
 			fmt.Printf("❌ Error running scenario %s: %v\n", scenario.ID, err)
 			continue
 		} else {
-			slog.Debug("Scenario completed", "scenario_id", scenario.ID, "plan_type", result.PlanType, "execution_time", result.ExecutionTime)
+			slog.Debug("Scenario completed", "scenario_id", scenario.ID, "plan_type", result.PlanType)
 		}
 		results = append(results, result)
 	}
@@ -323,20 +316,63 @@ func runAllTestCombinations(scenarios []TestScenario, selectivities []float64, r
 	})
 
 	// Output results in table format
-	outputResultsTable(results)
+	return results
+}
+
+func getRU(plan *ExecutionPlan) float64 {
+	if plan == nil {
+		return 0.0
+	}
+	if plan.QueryInfo == "" {
+		return 0.0
+	}
+	ruRegex := regexp.MustCompile(ruRegexStr)
+	ruMatch := ruRegex.FindStringSubmatch(plan.QueryInfo)
+	if len(ruMatch) == 2 {
+		ru, err := strconv.ParseFloat(ruMatch[1], 64)
+		if err == nil {
+			return ru
+		}
+	}
+	return 0.0
 }
 
 // outputResultsTable outputs results in a formatted table
-func outputResultsTable(results []*TestExecutionResult) {
-	fmt.Println("\n📊 Test Results Table")
+func outputDetailedResultsTable(results []*TestExecutionResult) {
+	fmt.Println("\n📊 Test Results Table - All results")
 	fmt.Println("====================")
 
+	planChoosen := make(map[string]int)
+	fmt.Printf("Scenario\tTable_size\tCardinality\t")
+	fmt.Printf("RU\tms\n")
 	// Group results by ScenarioID
+	for _, r := range results {
+		if r.ExplainOnly {
+			planChoosen[r.ScenarioID+"/"+r.PlanType]++
+			continue
+		}
+		scenParts := strings.Split(r.ScenarioID, "_")
+		fmt.Printf("%s\t", strings.Join(scenParts, "\t"))
+		fmt.Printf("%.03f\t", getRU(r.Plan))
+		fmt.Printf("%.03f\n", r.Plan.ExecutionTime.Seconds()*1000.0)
+	}
+	fmt.Printf("\nScenario\tTable_size\tCardinality\t")
+	fmt.Printf("Plan\tCount\n")
+	for k, v := range planChoosen {
+		s := strings.Split(k, "/")
+		scenParts := strings.Split(s[0], "_")
+		fmt.Printf("%s\t%s\t%d\n", strings.Join(scenParts, "\t"), s[1], v)
+	}
+}
+
+func outputAggregatedResultsTable(results []*TestExecutionResult) {
+	fmt.Println("\n📊 Test Results Table - Grouped by test")
+	fmt.Println("====================")
+
 	scenarioMap := make(map[string][]*TestExecutionResult)
 	for _, result := range results {
 		scenarioMap[result.ScenarioID] = append(scenarioMap[result.ScenarioID], result)
 	}
-
 	// For deterministic output, get sorted ScenarioIDs
 	var scenarioIDs []string
 	for scenarioID := range scenarioMap {
@@ -344,8 +380,6 @@ func outputResultsTable(results []*TestExecutionResult) {
 	}
 	sort.Strings(scenarioIDs)
 
-	// {"txn_scope":"global","start_ts":461357749970665475,"for_update_ts":461357749970665475,"ru_consumption":1714.5729716536462}
-	ruRegex := regexp.MustCompile(`(?:"ru_consumption":)(\d+\.\d+)[^\d]`)
 	for i, scenarioID := range scenarioIDs {
 		group := scenarioMap[scenarioID]
 
@@ -363,15 +397,7 @@ func outputResultsTable(results []*TestExecutionResult) {
 				explainOnlyPlanType = res.PlanType
 				continue
 			}
-			var ru float64
-			matches := ruRegex.FindStringSubmatch(res.Plan.QueryInfo)
-			if len(matches) == 2 {
-				var err error
-				ru, err = strconv.ParseFloat(string(matches[1]), 64)
-				if err != nil {
-					fmt.Printf("Error converting %s to float: %v\n", string(matches[1]), err)
-				}
-			}
+			ru := getRU(res.Plan)
 			if minimum, ok := RUMin[res.PlanType]; !ok || minimum > ru {
 				RUMin[res.PlanType] = ru
 			}
