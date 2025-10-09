@@ -158,6 +158,8 @@ func (c *TiDBClient) ExecuteQueryGetPlan(query string) (*ExecutionPlan, error) {
 		return nil, fmt.Errorf("failed to parse execution plan: %w", err)
 	}
 	var s string
+	// TODO: Investigate if it is possible to get this in the OK package
+	//
 	err = c.db.QueryRow("select @@tidb_last_query_info").Scan(&s)
 	if err != nil {
 		return nil, fmt.Errorf("failed to to get last query info: %w", err)
