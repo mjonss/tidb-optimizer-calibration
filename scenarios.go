@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"math/rand"
 )
 
 // TestScenario represents a test scenario for optimizer validation
@@ -91,7 +92,10 @@ func GetTestScenariosWithRowCountsAndSelectivities(rowCounts []int, selectivitie
 			}
 		}
 	}
-
+	// Make sure they are run in random order.
+	rand.Shuffle(len(scenarios), func(i, j int) {
+		scenarios[i], scenarios[j] = scenarios[j], scenarios[i]
+	})
 	return scenarios
 }
 

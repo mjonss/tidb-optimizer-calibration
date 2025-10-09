@@ -4,14 +4,15 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math/bits"
 	"math/rand"
 )
 
 const (
-	IndexVsTableSchemaFmt = "CREATE TABLE %s (id int AUTO_INCREMENT PRIMARY KEY, b int, c varchar(255), KEY (b))"
+	IndexVsTableSchemaFmt = "CREATE TABLE %s (id int AUTO_INCREMENT PRIMARY KEY, b int, c varchar(%d), KEY (b))"
 )
 
-func CheckAndSetupTables(rowCounts []int, selectivities []float64) error {
+func CheckAndSetupTables(rowCounts []int, selectivities []float64, fillerSize int) error {
 	c := NewTiDBClient()
 
 	err := c.Connect(nil)
@@ -24,7 +25,7 @@ func CheckAndSetupTables(rowCounts []int, selectivities []float64) error {
 	// TODO: When inserting, try to set the selectivities already there, so it just needs fine tuning later
 	for _, rows := range rowCounts {
 		tableName := fmt.Sprintf("t%s", formatRowCountName(rows))
-		err = generateTestData(c, tableName, rows, selectivities)
+		err = generateTestData(c, tableName, rows, selectivities, fillerSize)
 		if err != nil {
 			return err
 		}
@@ -37,7 +38,7 @@ func CheckAndSetupTables(rowCounts []int, selectivities []float64) error {
 }
 
 // generateTestData generates test data with varying selectivity patterns
-func generateTestData(c *TiDBClient, tableName string, rowCount int, selectivities []float64) error {
+func generateTestData(c *TiDBClient, tableName string, rowCount int, selectivities []float64, fillerSize int) error {
 	fmt.Printf("✅ Checking table %s\n", tableName)
 	// Check if table exists and has correct number of rows
 	recreateTable := false
@@ -51,7 +52,10 @@ func generateTestData(c *TiDBClient, tableName string, rowCount int, selectiviti
 		if err != nil {
 			return fmt.Errorf("failed to clear existing data: %v", err)
 		}
-		createStmt := fmt.Sprintf(IndexVsTableSchemaFmt, tableName)
+
+		// Use the next n^2 value af length of varchar()
+		varcharSize := max(255, (1 << (bits.Len64(uint64(fillerSize)) + 1)))
+		createStmt := fmt.Sprintf(IndexVsTableSchemaFmt, tableName, varcharSize)
 		_, err = c.ExecuteQuery(createStmt)
 		if err != nil {
 			return fmt.Errorf("failed to create table %s: %w", tableName, err)
@@ -67,7 +71,7 @@ func generateTestData(c *TiDBClient, tableName string, rowCount int, selectiviti
 		}
 
 		// Generate random data
-		err = generateRandomData(c, tableName, rowCount, selectivities)
+		err = generateRandomData(c, tableName, rowCount, selectivities, fillerSize)
 		if err != nil {
 			return fmt.Errorf("failed to generate random data: %v", err)
 		}
@@ -83,8 +87,8 @@ func generateTestData(c *TiDBClient, tableName string, rowCount int, selectiviti
 }
 
 // generateRandomData generates random data for the table
-func generateRandomData(c *TiDBClient, tableName string, rowCount int, _ []float64) error {
-	batchSize := 100000
+func generateRandomData(c *TiDBClient, tableName string, rowCount int, _ []float64, fillerSize int) error {
+	batchSize := min(100000, rowCount)
 	fmt.Printf("📊 Generating %d rows of random data... (one dot = %d rows)\n", rowCount, batchSize)
 
 	_, err := c.ExecuteQuery(fmt.Sprintf("drop table if exists tmp_%s", tableName))
@@ -134,7 +138,7 @@ func generateRandomData(c *TiDBClient, tableName string, rowCount int, _ []float
 		// TODO: Generate b values conforming to the seletivities
 		// TODO: Maybe use the mjonss/tidb_data_generator here, instead to speed it up
 		// Generate batch insert with random ID and values using INSERT IGNORE
-		query := fmt.Sprintf("INSERT IGNORE INTO %s (b,c) SELECT FLOOR(RAND() * 1000000), rand() * 1000000000 FROM %s LIMIT %d", tableName, tmpTbls, currentBatchSize)
+		query := fmt.Sprintf("INSERT IGNORE INTO %s (b,c) SELECT FLOOR(RAND() * 1000000), repeat(rand(),%d/18) FROM %s LIMIT %d", tableName, fillerSize, tmpTbls, currentBatchSize)
 		_, err = c.ExecuteQuery(query)
 		if err != nil {
 			return fmt.Errorf("failed to insert random data batch: %v", err)
@@ -315,7 +319,7 @@ func adjustSelectivities(c *TiDBClient, tableName string, rowCount int, selectiv
 // setupTableWithData creates a table with the standard schema and populates it with data
 func setupTableWithData(c *TiDBClient, tableName string, rowCount int, selectivities []float64) error {
 	// Check if table already exists with correct row count
-	err := generateTestData(c, tableName, rowCount, selectivities)
+	err := generateTestData(c, tableName, rowCount, selectivities, 500)
 	if err != nil {
 		return fmt.Errorf("failed to populate table %s: %w", tableName, err)
 	}

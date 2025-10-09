@@ -11,19 +11,26 @@ func TestSimple(t *testing.T) {
 
 	// Run the optimizer tests
 	setupLogging("debug")
+	err := CheckAndSetupTables(rowCounts, selectivities, 500)
+	if err != nil {
+		t.Fatalf("CheckAndSetupTables failed: %v", err)
+	}
 	results := RunOptimizerTests(rowCounts, selectivities, 1)
 	outputDetailedResultsTable(results)
 	outputAggregatedResultsTable(results)
 }
 
 func TestMulti(t *testing.T) {
-	rowCounts := []int{1000000, 10000000}
+	rowCounts := []int{1000, 10000, 100000}
 	selectivities := []float64{0.02, 0.05, 0.075, 0.1, 0.15, 0.2}
 
 	// Run the optimizer tests
 	setupLogging("debug")
-	err := RunOptimizerTests(rowCounts, selectivities, 7)
+	err := CheckAndSetupTables(rowCounts, selectivities, 500)
 	if err != nil {
-		t.Fatalf("RunOptimizerTests failed: %v", err)
+		t.Fatalf("CheckAndSetupTables failed: %v", err)
 	}
+	results := RunOptimizerTests(rowCounts, selectivities, 3)
+	outputDetailedResultsTable(results)
+	outputAggregatedResultsTable(results)
 }

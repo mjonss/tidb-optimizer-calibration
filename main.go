@@ -4,7 +4,6 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
-	"math/rand"
 	"os"
 	"regexp"
 	"sort"
@@ -21,6 +20,7 @@ func main() {
 	// Parse command line flags
 	var logLevel = flag.String("l", "info", "Log level: debug, info, warn, error")
 	var rowCounts = flag.String("s", "1K,1M", "Comma-separated list of table sizes to test (e.g., 1,100,10000)")
+	var fillerSize = flag.Int("f", 100, "Filler column size")
 	var selectivities = flag.String("c", "50.0,25.0,12.5,6.25,3.125,1.5625,0.78125,0.390625,0.1953125", "Comma-separated list of selectivity/cardinality values (Selectivity: ratio (0.0-1.0) or Cardinality: row counts. E.g., 0.3,0.1,100,50,25)")
 	var repetitions = flag.Int("n", 1, "Number of times to repeat each test")
 	var detailedOutput = flag.Bool("d", true, "Detailed output, one line per test run")
@@ -48,7 +48,7 @@ func main() {
 	slog.Debug("Row counts to test", "rows", rows)
 	slog.Debug("Selectivity values to test", "selectivities", selValues)
 
-	err = CheckAndSetupTables(rows, selValues)
+	err = CheckAndSetupTables(rows, selValues, *fillerSize)
 	// Run comprehensive optimizer tests
 	results := RunOptimizerTests(rows, selValues, *repetitions)
 	if err != nil {
@@ -250,7 +250,6 @@ func RunOptimizerTests(rowCounts []int, selectivities []float64, repetitions int
 		selStrs[i] = strconv.Itoa(int(sel))
 	}
 	fmt.Printf("Selectivity: %s\n", strings.Join(selStrs, ", "))
-	fmt.Printf("Table structure: "+IndexVsTableSchemaFmt, "t1K")
 
 	// Run all test combinations against real TiDB cluster
 	fmt.Println("\n🎯 Running All Test Combinations Against Real TiDB")
@@ -282,10 +281,6 @@ func runAllTestCombinations(scenarios []TestScenario) []*TestExecutionResult {
 	slog.Info("Connected to TiDB cluster successfully")
 	fmt.Println("✅ Connected to TiDB cluster successfully!")
 	fmt.Println()
-
-	rand.Shuffle(len(scenarios), func(i, j int) {
-		scenarios[i], scenarios[j] = scenarios[j], scenarios[i]
-	})
 
 	// Run all scenarios with repetitions and collect results
 	var results []*TestExecutionResult
