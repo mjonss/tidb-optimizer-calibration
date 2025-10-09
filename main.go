@@ -343,7 +343,7 @@ func outputDetailedResultsTable(results []*TestExecutionResult) {
 	fmt.Println("====================")
 
 	planChoosen := make(map[string]int)
-	fmt.Printf("Scenario\tTable_size\tCardinality\t")
+	fmt.Printf("Scenario\tTable_size\tCardinality\tplan\t")
 	fmt.Printf("RU\tms\n")
 	// Group results by ScenarioID
 	for _, r := range results {
@@ -353,6 +353,7 @@ func outputDetailedResultsTable(results []*TestExecutionResult) {
 		}
 		scenParts := strings.Split(r.ScenarioID, "_")
 		fmt.Printf("%s\t", strings.Join(scenParts, "\t"))
+		fmt.Printf("%s\t", r.PlanType)
 		fmt.Printf("%.03f\t", getRU(r.Plan))
 		fmt.Printf("%.03f\n", r.Plan.ExecutionTime.Seconds()*1000.0)
 	}
